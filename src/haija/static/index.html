@@ -215,6 +215,7 @@
       <button id="btn-generate" class="primary">Generate</button>
       <button id="btn-validate">Validate</button>
       <button id="btn-run" class="primary">Run</button>
+      <button id="btn-stop" class="primary" style="display:none;background:var(--err);border-color:var(--err)">Stop</button>
       <button id="btn-export">Export</button>
       <button id="btn-replay">Replay</button>
     </div>
@@ -402,6 +403,8 @@ async function loadStatus() {
 
 function startPolling() {
   polling = true;
+  $('btn-run').style.display = 'none';
+  $('btn-stop').style.display = '';
   poll();
 }
 function poll() {
@@ -428,7 +431,11 @@ function poll() {
     if (polling) setTimeout(poll, 300);
   });
 }
-function stopPolling() { polling = false; }
+function stopPolling() {
+  polling = false;
+  $('btn-stop').style.display = 'none';
+  $('btn-run').style.display = '';
+}
 
 async function doOpen() {
   const path = prompt('Project directory:', '.');
@@ -467,6 +474,10 @@ async function doRun() {
   eventsSince = 0;
   setStatus('Running…', true);
   startPolling();
+}
+async function doStop() {
+  const r = await api('/api/stop', 'POST');
+  if (r.ok) logLine('[stop] stopping…', 'dim');
 }
 async function doExport() {
   const r = await api('/api/export', 'POST');
@@ -657,6 +668,7 @@ $('btn-new').onclick = doNew;
 $('btn-generate').onclick = doGenerate;
 $('btn-validate').onclick = doValidate;
 $('btn-run').onclick = doRun;
+$('btn-stop').onclick = doStop;
 $('btn-export').onclick = doExport;
 $('btn-options').onclick = openOptions;
 $('btn-clear').onclick = clearLog;

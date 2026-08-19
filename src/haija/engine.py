@@ -60,10 +60,21 @@ class Engine:
     turn: int = 0
     outcome: str | None = None
     winner: str | None = None
+    stopped: bool = False
+
+    def stop(self) -> None:
+        """Request a graceful stop at the next turn boundary."""
+        self.stopped = True
 
     def __post_init__(self) -> None:
         if not self.state:
             self.state = copy.deepcopy(self.framework.initial_state)
+        # Inject the agent roster into the initial state so that
+        # framework-generated "players" / "hands" stubs are populated.
+        if "players" in self.state and not self.state["players"]:
+            self.state["players"] = list(self.agents)
+        if "hands" in self.state and isinstance(self.state["hands"], dict) and not self.state["hands"]:
+            self.state["hands"] = {a: [] for a in self.agents}
 
     # ---- recording / streaming -------------------------------------------
     def record(self, entry: dict[str, Any]) -> None:
@@ -448,6 +459,9 @@ def run_game(
     )
 
     while engine.turn < fw.turn.max_turns and engine.outcome is None:
+        if engine.stopped:
+            obs({"type": "info", "message": "Run stopped by user."})
+            break
         engine.turn += 1
         if fw.turn.order == "simultaneous":
             actors = list(engine.agents)

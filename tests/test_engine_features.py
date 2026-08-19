@@ -97,6 +97,34 @@ def test_alliances():
     assert json.loads(e.dispatch_tool("my_allies", {}, "A")) == []
 
 
+def test_engine_injects_players_into_initial_state():
+    fw = {
+        "name": "G",
+        "initial_state": {"phase": "setup", "players": [], "hands": {}},
+        "actions": [],
+    }
+    e = Engine(Framework.from_dict(fw), ["Alpha", "Beta", "Gamma"])
+    assert e.state["players"] == ["Alpha", "Beta", "Gamma"]
+    assert e.state["hands"] == {"Alpha": [], "Beta": [], "Gamma": []}
+
+
+def test_engine_stop_flag():
+    e = _engine({"name": "G", "initial_state": {"x": 0}, "actions": []})
+    assert not e.stopped
+    e.stop()
+    assert e.stopped
+
+
+def test_engine_does_not_overwrite_preset_players():
+    fw = {
+        "name": "G",
+        "initial_state": {"players": ["PreSet"]},
+        "actions": [],
+    }
+    e = Engine(Framework.from_dict(fw), ["Alpha", "Beta"])
+    assert e.state["players"] == ["PreSet"]  # not overwritten
+
+
 def test_general_config_roundtrip():
     from haija.config import ProjectConfig, dump_config
     from io import StringIO

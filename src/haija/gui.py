@@ -273,6 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/generate": self._api_generate,
             "/api/validate": self._api_validate,
             "/api/run": self._api_run,
+            "/api/stop": self._api_stop,
             "/api/export": self._api_export,
             "/api/options": self._api_options,
         }
@@ -368,6 +369,14 @@ class Handler(BaseHTTPRequestHandler):
         s.worker_thread = threading.Thread(target=_run_thread, args=(s,), daemon=True)
         s.worker_thread.start()
         self._send_json({"ok": True, "message": "running…"})
+
+    def _api_stop(self, body: dict) -> None:
+        s = self.state
+        if not s.engine:
+            self._send_json({"ok": False, "message": "nothing to stop"})
+            return
+        s.engine.stop()
+        self._send_json({"ok": True, "message": "stopping…"})
 
     def _api_export(self, body: dict) -> None:
         s = self.state
