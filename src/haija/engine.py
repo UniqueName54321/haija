@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import random
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +77,69 @@ class Engine:
             self.state["players"] = list(self.agents)
         if "hands" in self.state and isinstance(self.state["hands"], dict) and not self.state["hands"]:
             self.state["hands"] = {a: [] for a in self.agents}
+        self._resolve_setup_state()
+
+    def _resolve_setup_state(self) -> None:
+        """Turn conventional generated card-game setup into a playable state.
+
+        Generated frameworks commonly describe a deck, empty per-player hands,
+        and an empty discard pile while leaving ``phase`` at ``setup``. There is
+        no setup turn or deal tool, so resolve that declarative state before the
+        first agent is called.
+        """
+        if str(self.state.get("phase", "")).lower() != "setup":
+            return
+
+        hands = self.state.get("hands")
+        deck = self.state.get("deck")
+        if not isinstance(hands, dict) or not isinstance(deck, list):
+            # A setup phase without declarative setup data must not trap agents
+            # in an unwinnable polling loop.
+            self.state["phase"] = "playing"
+            return
+
+        for agent in self.agents:
+            hands.setdefault(agent, [])
+
+        if deck and all(isinstance(hand, list) and not hand for hand in hands.values()):
+            random.shuffle(deck)
+            hand_size = self._starting_hand_size()
+            reserve = 1 if isinstance(self.state.get("discard_pile"), list) else 0
+            available = max(0, len(deck) - reserve)
+            hand_size = min(hand_size, available // max(1, len(self.agents)))
+            for _ in range(hand_size):
+                for agent in self.agents:
+                    hands[agent].append(deck.pop())
+
+        discard = self.state.get("discard_pile")
+        if isinstance(discard, list) and not discard and deck:
+            card = deck.pop()
+            discard.append(card)
+            for key in ("top_card", "current_card"):
+                if key in self.state:
+                    self.state[key] = copy.deepcopy(card)
+            color = card.get("color") if isinstance(card, dict) else None
+            if color is not None:
+                for key in ("current_color", "active_color"):
+                    if key in self.state:
+                        self.state[key] = color
+
+        self.state["phase"] = "playing"
+
+    def _starting_hand_size(self) -> int:
+        for key in ("initial_hand_size", "starting_hand_size", "cards_per_player", "hand_size"):
+            value = self.state.get(key)
+            if isinstance(value, int) and value >= 0:
+                return value
+        text = " ".join(
+            [self.framework.description, *self.framework.rules]
+        )
+        match = re.search(
+            r"(?:starts?|begins?|dealt|deals?)\s+(?:with\s+)?(\d+)\s+cards?",
+            text,
+            re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else 7
 
     # ---- recording / streaming -------------------------------------------
     def record(self, entry: dict[str, Any]) -> None:

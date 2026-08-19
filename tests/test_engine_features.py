@@ -106,6 +106,33 @@ def test_engine_injects_players_into_initial_state():
     e = Engine(Framework.from_dict(fw), ["Alpha", "Beta", "Gamma"])
     assert e.state["players"] == ["Alpha", "Beta", "Gamma"]
     assert e.state["hands"] == {"Alpha": [], "Beta": [], "Gamma": []}
+    assert e.state["phase"] == "playing"
+
+
+def test_engine_resolves_card_game_setup_before_turn_one():
+    deck = [{"color": "red", "value": n} for n in range(30)]
+    fw = {
+        "name": "UNO",
+        "description": "Each player starts with 7 cards.",
+        "initial_state": {
+            "phase": "setup",
+            "players": [],
+            "hands": {},
+            "deck": deck,
+            "discard_pile": [],
+            "current_card": None,
+            "current_color": None,
+            "turn_index": 0,
+        },
+        "actions": [],
+    }
+    e = Engine(Framework.from_dict(fw), ["Alpha", "Beta", "Gamma"])
+    assert e.state["phase"] == "playing"
+    assert all(len(hand) == 7 for hand in e.state["hands"].values())
+    assert len(e.state["deck"]) == 8
+    assert len(e.state["discard_pile"]) == 1
+    assert e.state["current_card"] == e.state["discard_pile"][-1]
+    assert e.state["current_color"] == "red"
 
 
 def test_engine_stop_flag():
@@ -201,3 +228,29 @@ def test_run_agent_stops_before_calling_provider():
     )
     result = run_agent(NeverCalledProvider(), AgentSpec(name="Alpha"), e, cfg)
     assert result == {"content": "(stopped)"}
+
+
+def test_provider_reports_clean_error_when_response_is_closed_by_stop(monkeypatch):
+    from haija.config import ModelConfig
+    from haija.provider import ChatProvider, ProviderError
+    import pytest
+
+    provider = ChatProvider(ModelConfig(api_key="test"))
+
+    class InterruptedResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def close(self):
+            pass
+
+        def read(self):
+            provider.cancel()
+            raise AttributeError("'NoneType' object has no attribute 'read'")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: InterruptedResponse())
+    with pytest.raises(ProviderError, match="Stopped by user"):
+        provider.chat([{"role": "user", "content": "go"}])

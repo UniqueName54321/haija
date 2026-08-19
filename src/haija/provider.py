@@ -133,6 +133,10 @@ class ChatProvider:
         except urllib.error.URLError as e:
             LOG.error("Network error: %s", e.reason)
             raise ProviderError(f"Network error: {e.reason}") from e
+        except Exception as e:  # closing a response from another thread varies by transport
+            if self._cancelled.is_set():
+                raise ProviderError("Stopped by user.") from e
+            raise
 
         finally:
             with self._response_lock:
@@ -232,6 +236,10 @@ class ChatProvider:
                 content = delta.get("content", "")
                 if content:
                     yield content
+        except Exception as e:  # see cancellation handling in chat()
+            if self._cancelled.is_set():
+                raise ProviderError("Stopped by user.") from e
+            raise
         finally:
             with self._response_lock:
                 self._response = None
