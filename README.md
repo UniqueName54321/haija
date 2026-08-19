@@ -83,6 +83,7 @@ haija run
 | `haija export [-o out.txt]` | Export the last run as a human-readable `.txt` |
 | `haija validate` | Load and sanity-check the project's framework |
 | `haija archetypes` | List built-in + project archetypes and active agents |
+| `haija options` | View and edit tone, archetypes, and model (see `--help`) |
 | `haija --version` | Print the version |
 
 All commands accept `--project <path>` (a project dir or a `haija.toml` path),
@@ -202,7 +203,8 @@ or off per game, or replace with entirely custom ones:
 Manage them (and the game **tone**) from the GUI's **Options → Archetypes & tone…**
 menu, which writes straight back to `haija.toml`. Toggling an archetype adds or
 removes it as an agent; "New archetype…" lets you define your own. From the
-terminal, `haija archetypes` lists what's available and what's active.
+terminal, `haija archetypes` lists what's available and what's active, and
+`haija options` edits tone, archetypes, and model non-interactively.
 
 ## Watching & exporting
 
@@ -213,9 +215,12 @@ responses, chain-of-thought, tool calls, and chat. Or open the GUI:
 haija gui
 ```
 
-The GUI (a basic Tkinter window — needs `python3-tk` on Linux, or a Python that
-ships Tk on Windows/macOS) lets you pick a project, run the game, watch it live
-in the log pane, and export everything with one click.
+The GUI (a Tkinter window — needs `python3-tk` on Linux, or a Python that ships
+Tk on Windows/macOS) has **full feature parity with the CLI**: create or open a
+project, generate a framework from a prompt, validate it, run and watch the game
+live, tweak options (archetypes, tone, and model) from the Options menu, and
+export everything with one click. A toolbar and a project sidebar keep it quick
+to use.
 
 When a game finishes, Haija saves `run.json` (the full structured log), the
 final `state.json`, and a `transcript.json` into the project directory. Turn

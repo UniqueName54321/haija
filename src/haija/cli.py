@@ -158,6 +158,79 @@ def cmd_archetypes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _split_ids(s: str) -> list[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _print_options(cfg: ProjectConfig) -> None:
+    from .archetypes import BUILTIN_ARCHETYPES
+
+    print(f"Project:   {cfg.name}")
+    print(f"Tone:      {cfg.tone or '(none)'}")
+    print(f"Model:     {cfg.model.provider} / {cfg.model.model}")
+    print(
+        f"Runtime:   framework={cfg.framework_path} state={cfg.state_path} "
+        f"max_steps_per_turn={cfg.max_steps_per_turn}"
+    )
+    print(f"\nAgents ({len(cfg.agents)}):")
+    for a in cfg.agents:
+        arch = f" ({a.archetype})" if a.archetype else ""
+        desc = f" — {a.description}" if a.description else ""
+        model = f" [model={a.model}]" if a.model else ""
+        print(f"  • {a.name}{arch}{desc}{model}")
+    built = list(BUILTIN_ARCHETYPES.values())
+    custom = list(cfg.archetypes.values())
+    print(f"\nArchetypes ({len(built)} built-in, {len(custom)} custom):")
+    for arch in built:
+        mark = "✓" if cfg.agent_for_archetype(arch.id) else " "
+        print(f"  [{mark}] {arch.name:16s} ({arch.id}) — {arch.persona}")
+    for arch in custom:
+        mark = "✓" if cfg.agent_for_archetype(arch.id) else " "
+        print(f"  [{mark}] {arch.name:16s} ({arch.id}) — {arch.persona}  [custom]")
+
+
+def cmd_options(args: argparse.Namespace) -> int:
+    toml = _resolve_project(args.project)
+    cfg = ProjectConfig.load(toml)
+    changed = False
+
+    if args.tone is not None:
+        cfg.set_tone(args.tone)
+        changed = True
+    if args.enable:
+        for i in _split_ids(args.enable):
+            cfg.set_archetype_enabled(i, True)
+        changed = True
+    if args.disable:
+        for i in _split_ids(args.disable):
+            cfg.set_archetype_enabled(i, False)
+        changed = True
+    if args.add_archetype:
+        cfg.add_archetype(*args.add_archetype)
+        changed = True
+    if args.remove_archetype:
+        cfg.remove_archetype(args.remove_archetype)
+        changed = True
+    if args.model:
+        cfg.model.model = args.model
+        changed = True
+    if args.base_url:
+        cfg.model.base_url = args.base_url
+        changed = True
+    if args.provider:
+        cfg.model.provider = args.provider
+        changed = True
+    if args.api_key_env:
+        cfg.model.api_key_env = args.api_key_env
+        changed = True
+
+    if changed:
+        cfg.save()
+        print(f"Saved options → {toml}\n")
+    _print_options(cfg)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="haija",
@@ -196,6 +269,19 @@ def main(argv: list[str] | None = None) -> int:
     arc = sub.add_parser("archetypes", help="list built-in and project archetypes")
     arc.add_argument("--project", default=".", help="project directory or haija.toml path (optional)")
     arc.set_defaults(func=cmd_archetypes)
+
+    o = sub.add_parser("options", help="view and edit game options (tone, archetypes, model)")
+    o.add_argument("--project", default=".", help="project directory or haija.toml path")
+    o.add_argument("--tone", default=None, help="set the game tone (use empty string to clear)")
+    o.add_argument("--enable", default=None, metavar="IDS", help="comma-separated archetype ids to enable")
+    o.add_argument("--disable", default=None, metavar="IDS", help="comma-separated archetype ids to disable")
+    o.add_argument("--add-archetype", nargs=3, metavar=("ID", "NAME", "PERSONA"), default=None, help="add a custom archetype")
+    o.add_argument("--remove-archetype", default=None, metavar="ID", help="remove a custom archetype")
+    o.add_argument("--model", default=None, help="set the default model")
+    o.add_argument("--base-url", default=None, help="set the API base URL")
+    o.add_argument("--provider", default=None, help="set the provider name")
+    o.add_argument("--api-key-env", default=None, help="set the API key env var")
+    o.set_defaults(func=cmd_options)
 
     args = p.parse_args(argv)
     return args.func(args) or 0

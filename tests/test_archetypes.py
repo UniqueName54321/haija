@@ -100,3 +100,28 @@ api_key_env = "OPENROUTER_API_KEY"
     assert cfg.agents[0].archetype == "lawyer"
     assert cfg.archetypes["my"].persona == "Persona"
     assert cfg.resolve_persona(cfg.agents[0]) == BUILTIN_ARCHETYPES["lawyer"].persona
+
+
+def test_add_remove_custom_archetype():
+    cfg = ProjectConfig(name="g", agents=[], model=ModelConfig())
+    cfg.add_archetype("mine", "Mine", "Persona here")
+    assert cfg.archetypes["mine"].persona == "Persona here"
+    cfg.enable_archetype("mine")
+    assert cfg.agent_for_archetype("mine") is not None
+    cfg.remove_archetype("mine")
+    assert "mine" not in cfg.archetypes
+    assert cfg.agent_for_archetype("mine") is None
+
+
+def test_set_tone_and_save():
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "haija.toml"
+        cfg = ProjectConfig(name="g", agents=[AgentSpec(name="A", archetype="normie")], model=ModelConfig())
+        cfg.save(p)
+        cfg2 = ProjectConfig.load(p)
+        assert cfg2.name == "g"
+        assert cfg2.agents[0].archetype == "normie"
+        cfg2.set_tone("grim")
+        cfg2.save(p)
+        cfg3 = ProjectConfig.load(p)
+        assert cfg3.tone == "grim"

@@ -103,6 +103,23 @@ class ProjectConfig:
         else:
             self.disable_archetype(arch_id)
 
+    def set_tone(self, tone: str) -> None:
+        self.tone = tone.strip()
+
+    def add_archetype(self, arch_id: str, name: str, persona: str) -> None:
+        self.archetypes[arch_id] = Archetype(arch_id, name or arch_id, persona)
+
+    def remove_archetype(self, arch_id: str) -> None:
+        self.archetypes.pop(arch_id, None)
+        self.disable_archetype(arch_id)
+
+    def save(self, path: Path | None = None) -> Path:
+        p = path or self.path
+        if p is None:
+            raise ValueError("no path to save config to")
+        p.write_text(dump_config(self), encoding="utf-8")
+        return p
+
     # ---- load / dump ------------------------------------------------------
     @classmethod
     def load(cls, path: Path) -> "ProjectConfig":
