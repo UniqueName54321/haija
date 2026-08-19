@@ -29,6 +29,7 @@ class Action:
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
     effects: list[dict[str, Any]] = field(default_factory=list)
+    guard: list[dict[str, Any]] = field(default_factory=list)  # preconditions (AND)
 
     def to_tool(self) -> dict[str, Any]:
         params = self.parameters or {"type": "object", "properties": {}}
@@ -56,6 +57,31 @@ class TurnConfig:
 
 
 @dataclass
+class Judge:
+    """Deterministic win/lose/draw conditions the engine evaluates itself."""
+
+    win: list[dict[str, Any]] = field(default_factory=list)
+    lose: list[dict[str, Any]] = field(default_factory=list)
+    draw: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.win or self.lose or self.draw)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "Judge":
+        d = d or {}
+        return cls(
+            win=_as_guard_list(d.get("win")),
+            lose=_as_guard_list(d.get("lose")),
+            draw=_as_guard_list(d.get("draw")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"win": self.win, "lose": self.lose, "draw": self.draw}
+
+
+@dataclass
 class Framework:
     name: str
     description: str = ""
@@ -66,6 +92,7 @@ class Framework:
     initial_state: dict[str, Any] = field(default_factory=dict)
     actions: list[Action] = field(default_factory=list)
     turn: TurnConfig = field(default_factory=TurnConfig)
+    judge: Judge = field(default_factory=Judge)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -76,6 +103,7 @@ class Framework:
                 description=a.get("description", ""),
                 parameters=a.get("parameters", {"type": "object", "properties": {}}),
                 effects=list(a.get("effects", [])),
+                guard=_as_guard_list(a.get("guard")),
             )
             for a in d.get("actions", [])
         ]
@@ -89,6 +117,7 @@ class Framework:
             initial_state=d.get("initial_state", {}),
             actions=actions,
             turn=TurnConfig.from_dict(d.get("turn", {})),
+            judge=Judge.from_dict(d.get("judge")),
             raw=d,
         )
 
@@ -108,10 +137,12 @@ class Framework:
                     "description": a.description,
                     "parameters": a.parameters,
                     "effects": a.effects,
+                    "guard": a.guard,
                 }
                 for a in self.actions
             ],
             "turn": {"order": self.turn.order, "max_turns": self.turn.max_turns},
+            "judge": self.judge.to_dict(),
         }
 
 
@@ -188,10 +219,16 @@ Return ONLY a JSON object with these fields (no markdown fences, no commentary):
         "properties": { "x": { "type": "string", "description": "..." } },
         "required": ["x"]
       },
-      "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ]
+      "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ],
+      "guard": [ { "op": "not_exists", "path": "board.{{params.cell}}" } ]
     }
   ],
-  "turn": { "order": "round_robin", "max_turns": 20 }
+  "turn": { "order": "round_robin", "max_turns": 20 },
+  "judge": {
+    "win":  [ { "op": "eq", "path": "winner", "value": "{{actor}}" } ],
+    "lose": [],
+    "draw": []
+  }
 }
 
 Effect rules:
@@ -203,6 +240,15 @@ Effect rules:
   {{params.x}}, {{state.some.key}}, {{turn}}, {{now}}.
 - Every action agents need MUST be listed under "actions"; agents change state
   only through actions. The engine is the single source of truth.
+
+Guard rules (optional):
+- An action may have a "guard" list of conditions that MUST all be true for the
+  action to be legal; the engine rejects illegal moves automatically.
+- The top-level "judge" lets the engine decide the outcome itself: a passing
+  "win" guard means the acting agent wins, "lose" means it loses, "draw" is a
+  draw. Omit "judge" (or leave its lists empty) to let agents declare outcomes.
+- Guard ops: eq, neq, gt, gte, lt, lte, in, not_in, exists, not_exists. Each
+  guard is {"op": ..., "path": "...", "value": ...}, or {"not": {...}}.
 
 Do NOT include "name" or "schema_version" — Haija supplies those."""
 
@@ -223,6 +269,16 @@ def _as_str_list(value: Any) -> list[str]:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _as_guard_list(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [g for g in value if isinstance(g, dict)]
+    return []
 
 
 def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
@@ -248,6 +304,7 @@ def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
                 "description": _as_str(a.get("description")),
                 "parameters": params,
                 "effects": [e for e in effects if isinstance(e, dict)],
+                "guard": _as_guard_list(a.get("guard")),
             }
         )
 
@@ -271,6 +328,7 @@ def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
         "initial_state": _as_dict(content.get("initial_state")),
         "actions": actions,
         "turn": {"order": order, "max_turns": max_turns},
+        "judge": Judge.from_dict(content.get("judge")).to_dict(),
     }
 
 

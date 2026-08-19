@@ -37,6 +37,9 @@
       },
       "effects": [
         {"op": "set", "path": "board.{{params.cell}}", "value": "{{mark}}"}
+      ],
+      "guard": [
+        {"op": "eq", "path": "board.{{params.cell}}", "value": " "}
       ]
     }
   ],

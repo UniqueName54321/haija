@@ -40,8 +40,12 @@ LOSE CONDITIONS:
 The engine is the single source of truth for game state. You can only observe
 and change the world through your tools. Never claim a state you have not read
 via get_state. You may send messages to other agents with send_message to
-coordinate, negotiate, or bluff. Play to win, be decisive, and call end_turn
-when done."""
+coordinate, negotiate, or bluff. You have a private memory (remember / recall /
+recall_all) that no other agent can see — use it to track plans, suspicions, or
+secret information. You may form and break alliances (form_alliance /
+break_alliance). Some actions may be rejected if they're illegal — the engine
+enforces the rules, so read any error and try a legal move instead. Play to
+win, be decisive, and call end_turn when done."""
 
 
 def _tool_calls_to_api(tool_calls: list[ToolCall]) -> list[dict[str, Any]] | None:

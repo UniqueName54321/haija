@@ -17,6 +17,7 @@ from typing import Any, Callable
 from .agents import run_agent
 from .config import ProjectConfig
 from .framework import Action, Framework
+from .guards import evaluate_guards
 from .templating import resolve_path, resolve_value
 
 Observer = Callable[[dict[str, Any]], None]
@@ -50,6 +51,8 @@ class Engine:
     messages: list[dict[str, Any]] = field(default_factory=list)
     run_log: list[dict[str, Any]] = field(default_factory=list)
     last_seen: dict[str, int] = field(default_factory=dict)
+    private: dict[str, dict[str, Any]] = field(default_factory=dict)  # per-agent hidden memory
+    alliances: set[tuple[str, str]] = field(default_factory=set)  # sorted (a, b) pairs
     observer: Observer | None = field(default=None, repr=False)
     turn: int = 0
     outcome: str | None = None
@@ -119,6 +122,10 @@ class Engine:
         self, action: Action, actor: str, params: dict[str, Any]
     ) -> dict[str, Any]:
         ctx = self._ctx(actor, params)
+        if action.guard:
+            passed, reason = evaluate_guards(action.guard, ctx)
+            if not passed:
+                return {"ok": False, "error": f"illegal move: {reason}"}
         results = []
         for eff in action.effects:
             results.append(self._apply_one(eff, ctx))
@@ -131,7 +138,33 @@ class Engine:
                 "effects": results,
             }
         )
+        self._check_judge(actor, params)
         return {"ok": True, "effects": results, "state": self.public_state()}
+
+    def _check_judge(self, actor: str, params: dict[str, Any]) -> None:
+        """Evaluate the deterministic judge; declare an outcome if a guard passes."""
+        judge = self.framework.judge
+        if not judge.active or self.outcome:
+            return
+        ctx = self._ctx(actor, params)
+        if judge.win and evaluate_guards(judge.win, ctx)[0]:
+            self._set_outcome(actor, "win", actor, "judge: win condition met")
+        elif judge.lose and evaluate_guards(judge.lose, ctx)[0]:
+            self._set_outcome(actor, "lose", None, "judge: lose condition met")
+        elif judge.draw and evaluate_guards(judge.draw, ctx)[0]:
+            self._set_outcome(actor, "draw", None, "judge: draw condition met")
+
+    def _set_outcome(self, actor: str, outcome: str, winner: str | None, reason: str) -> None:
+        self.outcome = outcome
+        self.winner = winner
+        payload = {"from": actor, "type": "outcome", "outcome": outcome, "winner": winner, "reason": reason}
+        self.messages.append(payload)
+        self.record({"type": "outcome", "turn": self.turn, **payload})
+        self.emit({"type": "outcome", "from": actor, "outcome": outcome, "winner": winner, "reason": reason})
+
+    @staticmethod
+    def _alliance_pair(a: str, b: str) -> tuple[str, str]:
+        return tuple(sorted((a, b)))
 
     def _apply_one(self, eff: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
         op = eff.get("op", "set")
@@ -202,6 +235,10 @@ class Engine:
             self.emit({"type": "log", "from": actor, "text": args.get("entry", "")})
             return "Logged."
         if name == "declare_outcome":
+            if self.framework.judge.active:
+                return json.dumps(
+                    {"error": "the engine determines the outcome automatically for this game"}
+                )
             outcome = args.get("outcome")
             winner = args.get("winner")
             reason = args.get("reason", "")
@@ -236,6 +273,44 @@ class Engine:
                 }
             )
             return "Outcome recorded. Game over."
+        if name == "remember":
+            key = str(args.get("key", ""))
+            value = args.get("value")
+            self.private.setdefault(actor, {})[key] = value
+            self.record({"type": "remember", "turn": self.turn, "agent": actor, "key": key, "value": value})
+            self.emit({"type": "remember", "agent": actor, "key": key})
+            return "Remembered."
+        if name == "recall":
+            key = str(args.get("key", ""))
+            return json.dumps(self.private.get(actor, {}).get(key), indent=2)
+        if name == "recall_all":
+            return json.dumps(self.private.get(actor, {}), indent=2)
+        if name == "form_alliance":
+            other = str(args.get("with_agent", ""))
+            if not other or other == actor:
+                return json.dumps({"error": "provide another agent's name"})
+            self.alliances.add(self._alliance_pair(actor, other))
+            self.record({"type": "alliance", "turn": self.turn, "from": actor, "with": other, "action": "form"})
+            self.emit({"type": "alliance", "from": actor, "with": other, "action": "form"})
+            return f"Alliance formed with {other}."
+        if name == "break_alliance":
+            other = str(args.get("with_agent", ""))
+            pair = self._alliance_pair(actor, other)
+            if pair in self.alliances:
+                self.alliances.discard(pair)
+                self.record({"type": "alliance", "turn": self.turn, "from": actor, "with": other, "action": "break"})
+                self.emit({"type": "alliance", "from": actor, "with": other, "action": "break"})
+                return f"Alliance broken with {other}."
+            return f"No alliance with {other}."
+        if name == "list_alliances":
+            return json.dumps(sorted([list(p) for p in self.alliances]), indent=2)
+        if name == "my_allies":
+            allies = [
+                b if a == actor else a
+                for a, b in self.alliances
+                if actor in (a, b)
+            ]
+            return json.dumps(sorted(allies), indent=2)
         for action in self.framework.actions:
             if action.name == name:
                 result = self.apply_action(action, actor, args or {})
@@ -329,6 +404,11 @@ def render_export(
             L.append(f"\n[chat] {entry['from']} → {entry['to']}: {entry['text']}")
         elif et == "log":
             L.append(f"\n[log] {entry['from']}: {entry['text']}")
+        elif et == "remember":
+            L.append(f"\n[private] {entry['agent']} remembers '{entry['key']}'")
+        elif et == "alliance":
+            verb = "forms alliance with" if entry.get("action") == "form" else "breaks alliance with"
+            L.append(f"\n[alliance] {entry['from']} {verb} {entry['with']}")
         elif et == "outcome":
             L.append(
                 f"\n[outcome] {entry['from']} declares {entry['outcome']} "
@@ -431,6 +511,11 @@ def print_observer(event: dict[str, Any]) -> None:
         print(f"[{event['from']} → {event['to']}] {event['text']}")
     elif t == "log":
         print(f"[{event['from']} logs] {event['text']}")
+    elif t == "remember":
+        print(f"[{event['agent']} remembers] {event['key']}")
+    elif t == "alliance":
+        verb = "forms alliance with" if event.get("action") == "form" else "breaks alliance with"
+        print(f"[alliance] {event['from']} {verb} {event['with']}")
     elif t == "outcome":
         print(f"[{event['from']} declares] {event['outcome']} (winner {event.get('winner') or '?'}): {event.get('reason', '')}")
     elif t == "game_over":

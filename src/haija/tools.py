@@ -88,12 +88,89 @@ def builtin_tools() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember",
+                "description": "Store a value in your private memory, which no other agent can see.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "A name for this memory."},
+                        "value": {"description": "Any value to store (string, number, object, list, or boolean)."},
+                    },
+                    "required": ["key"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recall",
+                "description": "Read a value from your private memory (only your own).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                    "required": ["key"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recall_all",
+                "description": "Read all of your private memory.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "form_alliance",
+                "description": "Form a mutual alliance with another agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"with_agent": {"type": "string", "description": "The other agent's name."}},
+                    "required": ["with_agent"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "break_alliance",
+                "description": "Break an existing alliance with another agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"with_agent": {"type": "string", "description": "The other agent's name."}},
+                    "required": ["with_agent"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_alliances",
+                "description": "List all current alliances between agents.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "my_allies",
+                "description": "List the agents you are currently allied with.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
 
 
 def all_tools(framework: Framework) -> list[dict[str, Any]]:
     """Built-in tools plus every framework-defined action."""
     tools = builtin_tools()
+    if framework.judge.active:
+        tools = [t for t in tools if t["function"]["name"] != "declare_outcome"]
     for action in framework.actions:
         tools.append(action.to_tool())
     return tools

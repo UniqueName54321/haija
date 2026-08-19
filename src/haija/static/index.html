@@ -324,6 +324,8 @@ function formatEvent(ev) {
   if (t === 'tool') return `[${ev.agent} → ${ev.name}(${JSON.stringify(ev.arguments || {})})]`;
   if (t === 'message') return `[${ev.from} → ${ev.to}] ${ev.text}`;
   if (t === 'log') return `[${ev.from} logs] ${ev.text}`;
+  if (t === 'remember') return `[${ev.agent} remembers] ${ev.key}`;
+  if (t === 'alliance') return `[alliance] ${ev.from} ${ev.action === 'form' ? 'forms alliance with' : 'breaks alliance with'} ${ev.with}`;
   if (t === 'outcome') return `[${ev.from} declares] ${ev.outcome} (winner ${ev.winner || '?'}): ${ev.reason || ''}`;
   if (t === 'game_over') {
     let out = '\n=== GAME OVER ===';
@@ -342,6 +344,8 @@ function eventClass(ev) {
   if (ev.type === 'tool') return 'tool';
   if (ev.type === 'outcome' || ev.type === 'game_over') return 'outcome';
   if (ev.type === 'assistant' || ev.type === 'reasoning') return 'agent';
+  if (ev.type === 'remember') return 'agent';
+  if (ev.type === 'alliance') return 'chat';
   return '';
 }
 
@@ -533,6 +537,12 @@ function renderReplayEntry(e) {
   } else if (t === 'log') {
     div.classList.add('rp-chat');
     div.appendChild(rpHeader(`📝 ${e.from}: ${e.text}`));
+  } else if (t === 'remember') {
+    div.classList.add('rp-chat');
+    div.appendChild(rpHeader(`🔒 ${e.agent} remembers '${e.key}'`));
+  } else if (t === 'alliance') {
+    div.classList.add('rp-chat');
+    div.appendChild(rpHeader(`🤝 ${e.from} ${e.action === 'form' ? 'forms alliance with' : 'breaks alliance with'} ${e.with}`));
   } else if (t === 'outcome') {
     div.classList.add('rp-outcome');
     div.appendChild(rpHeader(`${e.from} declares ${e.outcome} (winner ${e.winner || '?'})`));

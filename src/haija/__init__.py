@@ -7,4 +7,4 @@ single source of truth a cast of customizable agents play against — observing
 and acting on the world exclusively through tool calls.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

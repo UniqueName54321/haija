@@ -19,6 +19,9 @@ calls.
 - 🖥️ **Browser GUI** — `haija gui` starts a local server and opens a web UI in your browser (no Tkinter, full CLI parity).
 - 📄 **Export the whole run** — responses, tool calls, and chain-of-thought, saved as a human-readable `.txt`.
 - 🔁 **Replay viewer** — scrub through a finished run turn-by-turn in the GUI.
+- ⚖️ **Deterministic judge** — the engine checks win/lose/draw conditions itself (no trusting agent-declared outcomes).
+- 🛡️ **Rule guards** — actions can declare preconditions; illegal moves are rejected by the engine.
+- 🕵️ **Hidden info & memory** — per-agent private memory, plus alliances between agents.
 
 ## How it works
 
@@ -128,6 +131,9 @@ A Haija framework is a single JSON object:
       },
       "effects": [
         {"op": "set", "path": "board.{{params.cell}}", "value": "{{mark}}"}
+      ],
+      "guard": [
+        {"op": "eq", "path": "board.{{params.cell}}", "value": " "}
       ]
     }
   ],
@@ -153,6 +159,36 @@ Paths and values support templates:
 - `{{params.x}}` — an action parameter
 - `{{state.some.key}}` — a value in the current state
 - `{{turn}}`, `{{now}}` — turn number / unix timestamp
+
+### Rule guards & the deterministic judge
+
+Actions can declare **guards** — preconditions the engine checks before applying
+effects. An illegal move is rejected (the agent sees the error and can retry):
+
+```json
+{ "name": "place_mark", "effects": ["..."],
+  "guard": [ { "op": "eq", "path": "board.{{params.cell}}", "value": " " } ] }
+```
+
+A framework can also define a **judge** — deterministic win/lose/draw
+conditions the engine evaluates after every action, so outcomes don't depend on
+an agent remembering to call `declare_outcome`:
+
+```json
+"judge": {
+  "win":  [ { "op": "gte", "path": "score", "value": 10 } ],
+  "lose": [ { "op": "lte", "path": "hp", "value": 0 } ],
+  "draw": []
+}
+```
+
+When a `win` guard passes, the acting agent wins; `lose` → it loses; `draw` → a
+draw. When a judge is present, `declare_outcome` is removed from the agents'
+tools — the engine is authoritative.
+
+Guard ops: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `exists`,
+`not_exists` (wrap one in `{"not": ...}` to negate). Paths and values use the
+same `{{...}}` templates as effects.
 
 ## Agent config
 
@@ -252,12 +288,21 @@ haija export -o out.txt # or anywhere you like
 The export includes the framework, every turn's responses, tool calls and
 results, chain-of-thought, chat messages, and the final state.
 
+## Hidden info & alliances
+
+Agents have **private memory** — `remember(key, value)`, `recall(key)`, and
+`recall_all()` — that no other agent can read. They can also form and break
+**alliances** (`form_alliance`, `break_alliance`, `my_allies`, `list_alliances`).
+Both are tracked by the engine and recorded in the run log, so they appear in
+exports and the replay viewer.
+
 ## Roadmap
 
-- **Rule guards + a deterministic judge** — automatic win/lose detection instead
-  of agent-declared outcomes, plus validation of action legality.
 - **Offline effect simulation** — resolve actions without an LLM in the loop.
-- **Hidden information & memory** — per-agent private state, alliances.
+- **Richer judge conditions** — multi-agent win conditions (e.g. "highest score
+  wins" at the turn limit), and line/pattern checks.
+- **More memory primitives** — shared team memory, and private-state hooks in the
+  framework file.
 
 ## License
 
