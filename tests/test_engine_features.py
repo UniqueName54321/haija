@@ -297,3 +297,112 @@ def test_provider_reports_clean_error_when_response_is_closed_by_stop(monkeypatc
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: InterruptedResponse())
     with pytest.raises(ProviderError, match="Stopped by user"):
         provider.chat([{"role": "user", "content": "go"}])
+
+
+def _card_action():
+    return {
+        "name": "play_card",
+        "parameters": {"type": "object", "properties": {"card": {"type": "string"}}, "required": ["card"]},
+        "guard": [{"op": "exists", "path": "hands.{{actor}}.{{params.card}}"}],
+        "effects": [
+            {"op": "remove", "path": "hands.{{actor}}.{{params.card}}"},
+            {"op": "append", "path": "discard_pile", "value": "{{params.card}}"},
+        ],
+    }
+
+
+def test_state_scheduler_honors_reverse_skip_and_draw_cards():
+    state = {
+        "hands": {"A": ["BReverse", "R1"], "B": ["G1"], "C": ["Y1"]},
+        "deck": ["R2", "R3", "R4", "R5"], "discard_pile": ["B5"],
+        "turn_index": 0, "direction": 1,
+    }
+    e = Engine(Framework.from_dict({"name": "Cards", "initial_state": state, "actions": [_card_action()]}), ["A", "B", "C"])
+    assert e.apply_action(e.framework.actions[0], "A", {"card": "BReverse"})["ok"]
+    e.finish_turn()
+    assert e.state["direction"] == -1 and e.current_actor() == "C"
+
+    state["hands"]["A"] = ["RDraw2", "R1"]
+    state["direction"] = 1
+    e = Engine(Framework.from_dict({"name": "Cards", "initial_state": state, "actions": [_card_action()]}), ["A", "B", "C"])
+    before = len(e.state["hands"]["B"])
+    assert e.apply_action(e.framework.actions[0], "A", {"card": "RDraw2"})["ok"]
+    e.finish_turn()
+    assert len(e.state["hands"]["B"]) == before + 2 and e.current_actor() == "C"
+
+
+def test_agent_state_view_hides_other_hands_and_deck():
+    e = _engine({"name": "Cards", "initial_state": {
+        "hands": {"Alpha": ["A"], "Beta": ["B", "C"]}, "deck": [1, 2, 3]}, "actions": []})
+    view = e.public_state("Alpha")
+    assert view["hands"]["Alpha"] == ["A"]
+    assert view["hands"]["Beta"] == {"count": 2, "hidden": True}
+    assert view["deck"] == {"count": 3, "hidden": True}
+
+
+def test_empty_hand_wins_automatically():
+    fw = Framework.from_dict({"name": "Cards", "initial_state": {
+        "hands": {"A": ["R1"]}, "discard_pile": []}, "actions": [_card_action()]})
+    e = Engine(fw, ["A"])
+    assert e.apply_action(fw.actions[0], "A", {"card": "R1"})["ok"]
+    assert (e.outcome, e.winner) == ("win", "A")
+
+
+def test_action_effects_are_atomic_and_parameters_are_checked():
+    fw = Framework.from_dict({"name": "Atomic", "initial_state": {"log": []}, "actions": [{
+        "name": "act", "parameters": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+        "effects": [{"op": "append", "path": "log", "value": "changed"}, {"op": "append", "path": "missing", "value": "boom"}],
+    }]})
+    e = Engine(fw, ["A"])
+    assert not e.apply_action(fw.actions[0], "A", {})["ok"]
+    assert not e.apply_action(fw.actions[0], "A", {"n": "wrong"})["ok"]
+    assert not e.apply_action(fw.actions[0], "A", {"n": 1})["ok"]
+    assert e.state["log"] == []
+
+
+def test_first_class_turn_and_draw_effects_resolve_in_order():
+    fw = Framework.from_dict({"name": "Cards", "initial_state": {
+        "hands": {"A": ["x"], "B": [], "C": []}, "deck": [1, 2, 3],
+        "discard_pile": ["R1"], "turn_index": 0, "direction": 1,
+    }, "actions": [{"name": "power", "effects": [
+        {"op": "reverse_direction"},
+        {"op": "draw", "from": "deck", "path": "hands.{{next_actor}}", "count": 2},
+        {"op": "skip_next", "value": 1},
+    ]}]})
+    e = Engine(fw, ["A", "B", "C"])
+    assert e.apply_action(fw.actions[0], "A", {})["ok"]
+    assert len(e.state["hands"]["C"]) == 2
+    e.finish_turn()
+    assert e.current_actor() == "B"
+
+
+def test_run_game_uses_authoritative_turn_index(monkeypatch):
+    import haija.engine as engine_module
+    from haija.config import AgentSpec, ModelConfig, ProjectConfig
+
+    fw = Framework.from_dict({
+        "name": "Turns", "initial_state": {"turn_index": 0, "direction": -1},
+        "actions": [], "turn": {"order": "round_robin", "max_turns": 3},
+    })
+    e = Engine(fw, ["A", "B", "C"])
+    seen = []
+    monkeypatch.setattr(engine_module, "run_agent", lambda provider, agent, engine, cfg: seen.append(agent.name))
+    monkeypatch.setattr(engine_module, "_persist", lambda engine, cfg: "saved")
+    cfg = ProjectConfig("Turns", [AgentSpec(name=n) for n in e.agents], ModelConfig(api_key="x"))
+    assert engine_module.run_game(e, object(), cfg, observer=lambda event: None) == "saved"
+    assert seen == ["A", "C", "B"]
+
+
+def test_repeated_identical_tool_calls_end_stalled_turn():
+    from haija.agents import run_agent
+    from haija.config import AgentSpec, ModelConfig, ProjectConfig
+    from haija.provider import ChatResponse, ToolCall
+
+    class Repeater:
+        def chat(self, *args, **kwargs):
+            return ChatResponse(content="again", tool_calls=[ToolCall("same", "get_state", {})])
+
+    e = Engine(Framework.from_dict({"name": "G", "initial_state": {}, "actions": []}), ["A"])
+    cfg = ProjectConfig("G", [AgentSpec(name="A")], ModelConfig(api_key="x"))
+    result = run_agent(Repeater(), cfg.agents[0], e, cfg)
+    assert result == {"content": "(stalled turn ended)"}

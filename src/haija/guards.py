@@ -10,9 +10,8 @@ uses guards two ways:
   guards are checked after every action; when one passes, the engine declares
   the outcome itself instead of trusting an agent to do it.
 
-Ops: ``eq``, ``neq``, ``gt``, ``gte``, ``lt``, ``lte``, ``in``, ``not_in``,
-``exists``, ``not_exists``. A guard may be negated with ``{"not": {...}}`` and a
-list of guards is an implicit AND.
+Ops include equality/comparison, membership, existence, and collection length.
+Guards support ``not``, ``all``, and ``any`` boolean groups.
 """
 
 from __future__ import annotations
@@ -77,9 +76,19 @@ def evaluate_guard(guard: dict[str, Any], ctx: dict[str, Any]) -> tuple[bool, st
     if "not" in guard:
         passed, reason = evaluate_guard(guard["not"], ctx)
         return not passed, reason
+    if "all" in guard:
+        return evaluate_guards(guard["all"], ctx)
+    if "any" in guard:
+        reasons = []
+        for item in guard["any"]:
+            passed, reason = evaluate_guard(item, ctx)
+            if passed:
+                return True, reason
+            reasons.append(reason)
+        return False, "none passed: " + "; ".join(reasons)
 
     op = guard.get("op", "eq")
-    if op not in ("eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in", "exists", "not_exists"):
+    if op not in ("eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in", "contains", "not_contains", "exists", "not_exists", "length_eq", "length_gt", "length_gte", "length_lt", "length_lte"):
         raise GuardError(f"unknown guard op: {op}")
     path = guard.get("path", "")
     segs = resolve_path(path, ctx)
@@ -94,6 +103,20 @@ def evaluate_guard(guard: dict[str, Any], ctx: dict[str, Any]) -> tuple[bool, st
 
     if not found:
         return (False, f"{display} is missing")
+
+    if op.startswith("length_"):
+        try:
+            actual_length = len(actual)
+        except TypeError:
+            return False, f"{display} has no length"
+        expected_number = _to_number(expected)
+        if expected_number is None:
+            return False, f"length comparison requires a number, got {expected!r}"
+        comparator = op.removeprefix("length_")
+        numeric = {"eq": actual_length == expected_number, "gt": actual_length > expected_number,
+                   "gte": actual_length >= expected_number, "lt": actual_length < expected_number,
+                   "lte": actual_length <= expected_number}
+        return numeric[comparator], f"len({display}) {comparator} {expected!r} (got {actual_length})"
 
     if op == "eq":
         return (_smart_eq(actual, expected), f"{display} == {expected!r} (got {actual!r})")
@@ -119,6 +142,13 @@ def evaluate_guard(guard: dict[str, Any], ctx: dict[str, Any]) -> tuple[bool, st
             return (False, f"cannot test membership for {display}")
         passed = contained if op == "in" else not contained
         return (passed, f"{display} {op} {expected!r} (got {actual!r})")
+    if op in ("contains", "not_contains"):
+        try:
+            contained = expected in actual
+        except TypeError:
+            return False, f"cannot test membership in {display}"
+        passed = contained if op == "contains" else not contained
+        return passed, f"{display} {op} {expected!r}"
     raise GuardError(f"unknown guard op: {op}")
 
 

@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import ProjectConfig
 from .engine import Engine, run_game
-from .framework import load_framework
+from .framework import load_framework, validate_framework
 from .generate import generate_framework
 from .logging_setup import setup_logging
 from .project import new_project, projects_root
@@ -356,11 +356,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             s.fw = load_framework(s.toml_path.parent / s.cfg.framework_path)
+            errors, warnings = validate_framework(s.fw)
+            if errors:
+                self._send_json({"ok": False, "message": "; ".join(errors)})
+                return
+            suffix = f"; warnings: {'; '.join(warnings)}" if warnings else ""
             self._send_json(
                 {
                     "ok": True,
                     "message": f"OK — framework '{s.fw.name}' "
-                    f"({len(s.fw.actions)} actions, {len(s.cfg.agents)} agents)",
+                    f"({len(s.fw.actions)} actions, {len(s.cfg.agents)} agents){suffix}",
                 }
             )
         except Exception as e:  # noqa: BLE001
@@ -374,10 +379,16 @@ class Handler(BaseHTTPRequestHandler):
         if s.busy:
             self._send_json({"ok": False, "message": "a task is already running"})
             return
+        errors, warnings = validate_framework(s.fw)
+        if errors:
+            self._send_json({"ok": False, "message": "framework is not executable: " + "; ".join(errors)})
+            return
         s.busy = True
         s.stop_requested = False
         s.engine = None
         s.events.clear()
+        for warning in warnings:
+            s.add_event({"type": "info", "message": f"Framework warning: {warning}"})
         s.worker_thread = threading.Thread(target=_run_thread, args=(s,), daemon=True)
         s.worker_thread.start()
         self._send_json({"ok": True, "message": "running…"})

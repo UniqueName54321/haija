@@ -71,3 +71,13 @@ def test_guard_unknown_op_raises():
     except GuardError:
         return
     raise AssertionError("expected GuardError for unknown op")
+
+
+def test_collection_length_contains_and_boolean_groups():
+    ctx = _ctx({"hand": ["R1", "B2"]})
+    assert evaluate_guard({"op": "contains", "path": "hand", "value": "R1"}, ctx)[0]
+    assert evaluate_guard({"op": "length_eq", "path": "hand", "value": 2}, ctx)[0]
+    assert evaluate_guard({"any": [
+        {"op": "contains", "path": "hand", "value": "X"},
+        {"op": "length_lt", "path": "hand", "value": 3},
+    ]}, ctx)[0]

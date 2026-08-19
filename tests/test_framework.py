@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from haija.framework import Framework, assemble_framework, load_framework, normalize_content
+from haija.framework import Framework, assemble_framework, load_framework, normalize_content, validate_framework
 from haija.generate import generate_framework
 from haija.provider import ChatResponse
 
@@ -100,3 +100,13 @@ def test_generate_framework_assembles_via_fake_provider():
     assert fw.rules == ["r"]
     assert fw.initial_state == {"hp": 10}
     assert [a.name for a in fw.actions] == ["attack"]
+
+
+def test_semantic_framework_validation_rejects_bad_effect_graph():
+    fw = Framework.from_dict({
+        "name": "Bad", "initial_state": {"phase": "setup"},
+        "actions": [{"name": "x", "effects": [{"op": "teleport", "path": "x"}]}],
+    })
+    errors, _ = validate_framework(fw)
+    assert any("unknown effect op" in error for error in errors)
+    assert any("setup phase requires" in error for error in errors)

@@ -63,6 +63,8 @@ class Engine:
     outcome: str | None = None
     winner: str | None = None
     stopped: bool = False
+    _advanced_this_turn: bool = field(default=False, init=False, repr=False)
+    _rng: random.Random = field(init=False, repr=False)
 
     def stop(self) -> None:
         """Request a graceful stop at the next turn boundary."""
@@ -71,6 +73,11 @@ class Engine:
     def __post_init__(self) -> None:
         if not self.state:
             self.state = copy.deepcopy(self.framework.initial_state)
+        seed = self.state.get("random_seed")
+        if not isinstance(seed, int):
+            seed = random.SystemRandom().randrange(2**63)
+        self.state["_random_seed"] = seed
+        self._rng = random.Random(seed)
         # Inject the agent roster into the initial state so that
         # framework-generated "players" / "hands" stubs are populated.
         if "players" in self.state and not self.state["players"]:
@@ -78,6 +85,8 @@ class Engine:
         if "hands" in self.state and isinstance(self.state["hands"], dict) and not self.state["hands"]:
             self.state["hands"] = {a: [] for a in self.agents}
         self._resolve_setup_state()
+        if self.agents and "turn_index" in self.state:
+            self.state["turn_index"] = int(self.state.get("turn_index", 0)) % len(self.agents)
 
     def _resolve_setup_state(self) -> None:
         """Turn conventional generated card-game setup into a playable state.
@@ -105,7 +114,7 @@ class Engine:
             hands.setdefault(agent, [])
 
         if deck and all(isinstance(hand, list) and not hand for hand in hands.values()):
-            random.shuffle(deck)
+            self._rng.shuffle(deck)
             hand_size = self._starting_hand_size()
             discard = self._discard_pile()
             reserve = 1 if discard is not None else 0
@@ -195,11 +204,23 @@ class Engine:
         return chat
 
     # ---- state access -----------------------------------------------------
-    def public_state(self) -> dict[str, Any]:
-        return copy.deepcopy(self.state)
+    def public_state(self, viewer: str | None = None) -> dict[str, Any]:
+        """Return full state internally, or a private-safe view for an agent."""
+        view = copy.deepcopy(self.state)
+        if viewer is None:
+            return view
+        hands = view.get("hands")
+        if isinstance(hands, dict):
+            for name, hand in list(hands.items()):
+                if name != viewer and isinstance(hand, list):
+                    hands[name] = {"count": len(hand), "hidden": True}
+        for key in ("deck", "draw_pile", "drawPile"):
+            if isinstance(view.get(key), list):
+                view[key] = {"count": len(view[key]), "hidden": True}
+        return view
 
-    def get_state(self, paths: list[str] | None = None) -> dict[str, Any]:
-        full = self.public_state()
+    def get_state(self, paths: list[str] | None = None, viewer: str | None = None) -> dict[str, Any]:
+        full = self.public_state(viewer)
         if not paths:
             return full
         out: dict[str, Any] = {}
@@ -216,13 +237,37 @@ class Engine:
             out[p] = cur
         return out
 
+    def current_actor(self) -> str:
+        if not self.agents:
+            raise ValueError("game has no agents")
+        index = int(self.state.get("turn_index", 0)) % len(self.agents)
+        self.state["turn_index"] = index
+        return self.agents[index]
+
+    def next_actor(self, steps: int = 1) -> str:
+        direction = -1 if int(self.state.get("direction", 1)) < 0 else 1
+        index = int(self.state.get("turn_index", 0))
+        return self.agents[(index + direction * steps) % len(self.agents)]
+
+    def finish_turn(self) -> None:
+        """Advance the authoritative state scheduler exactly once."""
+        if not self.agents or self._advanced_this_turn:
+            self._advanced_this_turn = False
+            return
+        skip = int(self.state.pop("skip_count", 0) or 0)
+        if self.state.pop("skip_next", False):
+            skip = max(skip, 1)
+        direction = -1 if int(self.state.get("direction", 1)) < 0 else 1
+        index = int(self.state.get("turn_index", 0))
+        self.state["turn_index"] = (index + direction * (1 + skip)) % len(self.agents)
+
     # ---- effect application ----------------------------------------------
     def _ctx(self, actor: str, params: dict[str, Any]) -> dict[str, Any]:
         mark = actor
         marks = self.state.get("marks")
         if isinstance(marks, dict) and actor in marks:
             mark = marks[actor]
-        return {
+        ctx = {
             "actor": actor,
             "mark": mark,
             "params": params,
@@ -230,19 +275,34 @@ class Engine:
             "turn": self.turn,
             "now": int(time.time()),
         }
+        if self.agents:
+            ctx["next_actor"] = self.next_actor()
+        return ctx
 
     def apply_action(
         self, action: Action, actor: str, params: dict[str, Any]
     ) -> dict[str, Any]:
+        param_error = self._validate_params(action, params)
+        if param_error:
+            return {"ok": False, "error": f"invalid parameters: {param_error}"}
         ctx = self._ctx(actor, params)
         if action.guard:
             passed, reason = evaluate_guards(action.guard, ctx)
             if not passed:
                 LOG.warning("guard rejected %s.%s(%s): %s", actor, action.name, params, reason)
                 return {"ok": False, "error": f"illegal move: {reason}"}
+        snapshot = copy.deepcopy(self.state)
+        advanced_before = self._advanced_this_turn
         results = []
-        for eff in action.effects:
-            results.append(self._apply_one(eff, ctx))
+        try:
+            for eff in action.effects:
+                results.append(self._apply_one(eff, ctx))
+            self._resolve_conventional_card_effects(action, actor, params)
+        except Exception as exc:  # action effects are an atomic transaction
+            self.state = snapshot
+            self._advanced_this_turn = advanced_before
+            LOG.warning("action failed %s.%s(%s): %s", actor, action.name, params, exc)
+            return {"ok": False, "error": f"action failed: {exc}"}
         self.history.append(
             {
                 "turn": self.turn,
@@ -253,7 +313,36 @@ class Engine:
             }
         )
         self._check_judge(actor, params)
-        return {"ok": True, "effects": results, "state": self.public_state()}
+        touched_hand = any(str(e.get("path", "")).startswith("hands.") for e in action.effects)
+        if touched_hand:
+            self._check_empty_hand_win(actor)
+        return {"ok": True, "effects": results, "state": self.public_state(actor)}
+
+    @staticmethod
+    def _validate_params(action: Action, params: dict[str, Any]) -> str | None:
+        schema = action.parameters or {}
+        for name in schema.get("required", []):
+            if name not in params:
+                return f"missing required parameter '{name}'"
+        types = {
+            "string": str, "integer": int, "number": (int, float),
+            "boolean": bool, "array": list, "object": dict,
+        }
+        for name, value in params.items():
+            prop = schema.get("properties", {}).get(name, {})
+            expected = types.get(prop.get("type"))
+            if expected and (isinstance(value, bool) and prop.get("type") in ("integer", "number") or not isinstance(value, expected)):
+                return f"parameter '{name}' must be {prop.get('type')}"
+            if "enum" in prop and value not in prop["enum"]:
+                return f"parameter '{name}' must be one of {prop['enum']}"
+        return None
+
+    def _check_empty_hand_win(self, actor: str) -> None:
+        if self.outcome:
+            return
+        hands = self.state.get("hands")
+        if isinstance(hands, dict) and actor in hands and hands[actor] == []:
+            self._set_outcome(actor, "win", actor, "engine: hand is empty")
 
     def _check_judge(self, actor: str, params: dict[str, Any]) -> None:
         """Evaluate the deterministic judge; declare an outcome if a guard passes."""
@@ -281,11 +370,19 @@ class Engine:
         return tuple(sorted((a, b)))
 
     def _apply_one(self, eff: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+        if self.agents:
+            ctx["next_actor"] = self.next_actor()
         op = eff.get("op", "set")
         path = eff.get("path", "")
         raw = eff.get("value")
         segs = resolve_path(path, ctx)
         value = resolve_value(raw, ctx)
+
+        if op == "if":
+            passed, _ = evaluate_guards(eff.get("guard", []), ctx)
+            branch = eff.get("effects" if passed else "else", [])
+            applied = [self._apply_one(item, ctx) for item in branch]
+            return {"op": "if", "passed": passed, "effects": applied}
 
         if op == "set":
             parent, key = self._parent_key(segs)
@@ -307,7 +404,77 @@ class Engine:
             else:
                 parent.pop(key, None)
             return {"op": "remove", "path": path}
+        if op == "shuffle":
+            target = self._navigate(segs)
+            self._rng.shuffle(target)
+            return {"op": "shuffle", "path": path}
+        if op in ("draw", "move"):
+            source_path = eff.get("from", "deck")
+            count = int(resolve_value(eff.get("count", 1), ctx))
+            if op == "draw" and source_path in ("deck", "draw_pile", "drawPile") and len(segs) == 2 and segs[0] == "hands":
+                drawn = self._draw_cards(segs[1], count)
+                return {"op": op, "from": source_path, "path": path, "count": drawn}
+            source = self._navigate(resolve_path(source_path, ctx))
+            target = self._navigate(segs)
+            moved = []
+            for _ in range(min(count, len(source))):
+                moved.append(source.pop())
+            target.extend(moved)
+            return {"op": op, "from": source_path, "path": path, "count": len(moved)}
+        if op == "reverse_direction":
+            self.state["direction"] = -int(self.state.get("direction", 1) or 1)
+            return {"op": op, "direction": self.state["direction"]}
+        if op == "skip_next":
+            self.state["skip_count"] = max(int(self.state.get("skip_count", 0)), int(value or 1))
+            return {"op": op, "count": self.state["skip_count"]}
+        if op == "advance_turn":
+            steps = int(value or 1)
+            direction = -1 if int(self.state.get("direction", 1)) < 0 else 1
+            index = int(self.state.get("turn_index", 0))
+            self.state["turn_index"] = (index + direction * steps) % len(self.agents)
+            self._advanced_this_turn = True
+            return {"op": op, "turn_index": self.state["turn_index"]}
         raise ValueError(f"unknown effect op: {op}")
+
+    def _resolve_conventional_card_effects(self, action: Action, actor: str, params: dict[str, Any]) -> None:
+        """Compatibility for generated card frameworks predating turn effects."""
+        if not isinstance(self.state.get("hands"), dict) or self._discard_pile() is None:
+            return
+        card = params.get("card")
+        if not isinstance(card, str):
+            return
+        declared = {e.get("op") for e in action.effects}
+        lower = card.lower()
+        if "reverse" in lower and "reverse_direction" not in declared:
+            self.state["direction"] = -int(self.state.get("direction", 1) or 1)
+        draw_count = 4 if ("wild4" in lower or "draw4" in lower or "+4" in lower) else 2 if ("draw2" in lower or "+2" in lower) else 0
+        skip = "skip" in lower or draw_count > 0
+        if draw_count and "draw" not in declared:
+            self._draw_cards(self.next_actor(), draw_count)
+        if skip and "skip_next" not in declared:
+            self.state["skip_count"] = max(int(self.state.get("skip_count", 0)), 1)
+
+    def _draw_cards(self, player: str, count: int) -> int:
+        hands = self.state.get("hands", {})
+        deck = next((self.state[k] for k in ("deck", "draw_pile", "drawPile") if isinstance(self.state.get(k), list)), [])
+        hand = hands.get(player) if isinstance(hands, dict) else None
+        if not isinstance(hand, list):
+            return 0
+        drawn = 0
+        for _ in range(count):
+            if not deck:
+                discard = self._discard_pile()
+                if discard and len(discard) > 1:
+                    top = discard.pop()
+                    deck.extend(discard)
+                    discard.clear()
+                    discard.append(top)
+                    self._rng.shuffle(deck)
+            if not deck:
+                break
+            hand.append(deck.pop())
+            drawn += 1
+        return drawn
 
     def _navigate(self, segs: list[str]) -> Any:
         cur: Any = self.state
@@ -335,7 +502,7 @@ class Engine:
     # ---- tool dispatch ----------------------------------------------------
     def dispatch_tool(self, name: str, args: dict[str, Any], actor: str) -> str:
         if name == "get_state":
-            return json.dumps(self.get_state(args.get("paths")), indent=2)
+            return json.dumps(self.get_state(args.get("paths"), actor), indent=2)
         if name == "end_turn":
             self.messages.append(
                 {"from": actor, "type": "turn_end", "text": args.get("summary", "")}
@@ -438,9 +605,10 @@ class Engine:
         for action in self.framework.actions:
             if action.name == name:
                 result = self.apply_action(action, actor, args or {})
-                self.messages.append(
-                    {"from": actor, "type": "action", "text": f"{name}({json.dumps(args or {})})"}
-                )
+                if result.get("ok"):
+                    self.messages.append(
+                        {"from": actor, "type": "action", "text": f"{name}({json.dumps(args or {})})"}
+                    )
                 return json.dumps(result, indent=2)
         raise ValueError(f"unknown tool: {name}")
 
@@ -575,16 +743,20 @@ def run_game(
         if fw.turn.order == "simultaneous":
             actors = list(engine.agents)
         else:
-            actors = [engine.agents[(engine.turn - 1) % len(engine.agents)]]
+            actors = [engine.current_actor()]
 
         for name in actors:
             agent = next((a for a in cfg.agents if a.name == name), None)
             if agent is None:
+                if fw.turn.order != "simultaneous":
+                    engine.finish_turn()
                 continue
             obs({"type": "turn_start", "turn": engine.turn, "agent": name})
             run_agent(provider, agent, engine, cfg)
             if engine.outcome or engine.stopped:
                 break
+            if fw.turn.order != "simultaneous":
+                engine.finish_turn()
 
     obs(
         {

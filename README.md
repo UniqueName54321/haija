@@ -153,12 +153,19 @@ Actions mutate state through a small declarative DSL:
 | `incr` | Add a number to a value at a dot-path |
 | `append` | Append a value to a list at a dot-path |
 | `remove` | Delete a key/index at a dot-path |
+| `shuffle` | Deterministically shuffle a list using the run seed |
+| `draw` / `move` | Move one or more values between lists |
+| `if` | Apply a guarded effect branch |
+| `reverse_direction` | Reverse authoritative turn direction |
+| `skip_next` | Skip one or more scheduled players |
+| `advance_turn` | Explicitly advance when an action owns scheduling |
 
 Paths and values support templates:
 
 - `{{actor}}` — the acting agent's name
 - `{{mark}}` — the agent's mark (looked up from `state.marks`)
 - `{{params.x}}` — an action parameter
+- `{{next_actor}}` — the next player under the current direction
 - `{{state.some.key}}` — a value in the current state
 - `{{turn}}`, `{{now}}` — turn number / unix timestamp
 
@@ -166,6 +173,15 @@ Paths and values support templates:
 
 Actions can declare **guards** — preconditions the engine checks before applying
 effects. An illegal move is rejected (the agent sees the error and can retry):
+
+Guards also support `contains`/`not_contains`, collection-length comparisons
+(`length_eq`, `length_gt`, and related ops), and `all`/`any`/`not` groups.
+
+Action effects are atomic: if any effect fails, the complete action is rolled
+back. The engine owns `turn_index`, `direction`, and skip resolution, and card
+games automatically end when a successful hand-changing action empties the
+actor's hand. Agents see their own hand but only the card counts of opponents;
+deck contents are hidden.
 
 ```json
 { "name": "place_mark", "effects": ["..."],

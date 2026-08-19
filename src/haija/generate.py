@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from .framework import Framework, assemble_framework, framework_content_instructions
+from .framework import Framework, assemble_framework, framework_content_instructions, validate_framework
 from .provider import ChatProvider
 
 LOG = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ def generate_framework(
         resp = provider.chat(messages, json_mode=True)
         data = _extract_json(resp.content)
         fw = assemble_framework(name, data)
+        errors, _ = validate_framework(fw)
+        if errors:
+            raise ValueError("generated framework is not executable: " + "; ".join(errors))
         LOG.info("framework generated: %d actions, %d rules", len(fw.actions), len(fw.rules))
         return fw
 
@@ -65,6 +68,9 @@ def generate_framework(
 
     data = _extract_json(full)
     fw = assemble_framework(name, data)
+    errors, _ = validate_framework(fw)
+    if errors:
+        raise ValueError("generated framework is not executable: " + "; ".join(errors))
     LOG.info("framework generated: %d actions, %d rules", len(fw.actions), len(fw.rules))
     observer({"type": "generate_done", "framework": fw.to_dict()})
     return fw

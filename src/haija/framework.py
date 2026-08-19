@@ -180,8 +180,11 @@ def framework_schema_instructions() -> str:
 }
 
 Effect rules:
-- "op" is one of: set (write a value), incr (add a number), append (add to a
-  list), remove (delete a key/index).
+- "op" may be set, incr, append, remove, shuffle, draw/move, if,
+  reverse_direction, skip_next, or advance_turn.
+- draw/move uses "from", "path", and optional "count". Example:
+  {"op":"draw","from":"deck","path":"hands.{{next_actor}}","count":4}.
+- if uses "guard", "effects", and optional "else" effect lists.
 - "path" is a dot-separated path into the state, e.g. "board.0" or
   "players.Alice.hp". List indices are integers.
 - Path segments and values may contain templates: {{actor}} (the acting agent's
@@ -232,8 +235,12 @@ Return ONLY a JSON object with these fields (no markdown fences, no commentary):
 }
 
 Effect rules:
-- "op" is one of: set (write a value), incr (add a number), append (add to a
-  list), remove (delete a key/index).
+- Effect ops: set, incr, append, remove, shuffle, draw, move, if,
+  reverse_direction, skip_next, advance_turn.
+- draw/move: {"op":"draw","from":"deck","path":"hands.{{next_actor}}","count":4}.
+- if: {"op":"if","guard":[...],"effects":[...],"else":[...]}.
+- Use reverse_direction, skip_next, and draw effects for action cards; prose
+  rules alone do not mutate state. The engine advances ordinary turns.
 - "path" is a dot-separated path into the state, e.g. "board.0" or
   "players.Alice.hp". List indices are integers.
 - Path segments and values may contain templates: {{actor}}, {{mark}},
@@ -252,7 +259,9 @@ Guard rules (optional):
 - The top-level "judge" lets the engine decide the outcome itself: a passing
   "win" guard means the acting agent wins, "lose" means it loses, "draw" is a
   draw. Omit "judge" (or leave its lists empty) to let agents declare outcomes.
-- Guard ops: eq, neq, gt, gte, lt, lte, in, not_in, exists, not_exists. Each
+- Guard ops: eq, neq, gt, gte, lt, lte, in, not_in, contains, not_contains,
+  exists, not_exists, length_eq, length_gt/gte/lt/lte. Boolean groups may use
+  {"all":[...]}, {"any":[...]}, or {"not":{...}}. Each simple
   guard is {"op": ..., "path": "...", "value": ...}, or {"not": {...}}.
 
 Do NOT include "name" or "schema_version" — Haija supplies those."""
@@ -349,3 +358,84 @@ def assemble_framework(name: str, content: dict[str, Any] | None) -> Framework:
     return Framework.from_dict(
         {"schema_version": SCHEMA_VERSION, "name": resolved_name, **body}
     )
+
+
+def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
+    """Return semantic ``(errors, warnings)`` beyond JSON shape validation."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    allowed = {
+        "set", "incr", "append", "remove", "shuffle", "draw", "move", "if",
+        "reverse_direction", "skip_next", "advance_turn",
+    }
+    names: set[str] = set()
+    guard_ops = {
+        "eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in", "contains",
+        "not_contains", "exists", "not_exists", "length_eq", "length_gt",
+        "length_gte", "length_lt", "length_lte",
+    }
+
+    def check_guard(guard: dict[str, Any], location: str) -> None:
+        for group in ("all", "any"):
+            if group in guard:
+                for child in guard.get(group, []):
+                    if isinstance(child, dict):
+                        check_guard(child, location)
+                return
+        if "not" in guard:
+            if isinstance(guard["not"], dict):
+                check_guard(guard["not"], location)
+            return
+        op = guard.get("op", "eq")
+        if op not in guard_ops:
+            errors.append(f"{location} uses unknown guard op '{op}'")
+        if not guard.get("path"):
+            errors.append(f"{location} guard '{op}' requires a path")
+
+    def check_effect(effect: dict[str, Any], action_name: str) -> None:
+        op = effect.get("op", "set")
+        if op not in allowed:
+            errors.append(f"action '{action_name}' uses unknown effect op '{op}'")
+        if op in ("set", "incr", "append", "remove", "shuffle", "draw", "move") and not effect.get("path"):
+            errors.append(f"action '{action_name}' effect '{op}' requires a path")
+        if op in ("draw", "move") and not effect.get("from"):
+            errors.append(f"action '{action_name}' effect '{op}' requires a from path")
+        if op == "if":
+            if not effect.get("guard"):
+                errors.append(f"action '{action_name}' conditional effect requires a guard")
+            condition = effect.get("guard", [])
+            if isinstance(condition, dict):
+                condition = [condition]
+            for guard in condition:
+                if isinstance(guard, dict):
+                    check_guard(guard, f"action '{action_name}' conditional")
+            for branch in (effect.get("effects", []), effect.get("else", [])):
+                for child in branch:
+                    if isinstance(child, dict):
+                        check_effect(child, action_name)
+
+    for action in framework.actions:
+        if action.name in names:
+            errors.append(f"duplicate action name '{action.name}'")
+        names.add(action.name)
+        if not action.effects:
+            warnings.append(f"action '{action.name}' has no effects")
+        for guard in action.guard:
+            check_guard(guard, f"action '{action.name}'")
+        for effect in action.effects:
+            check_effect(effect, action.name)
+    if not framework.actions:
+        warnings.append("framework has no game actions")
+    state = framework.initial_state
+    if str(state.get("phase", "")).lower() == "setup":
+        has_deck = any(isinstance(state.get(k), list) for k in ("deck", "draw_pile", "drawPile"))
+        if not isinstance(state.get("hands"), dict) or not has_deck:
+            errors.append("setup phase requires hands plus a deck/draw_pile")
+    if framework.turn.max_turns <= 0:
+        errors.append("turn.max_turns must be positive")
+    for label, guards in (("judge.win", framework.judge.win), ("judge.lose", framework.judge.lose), ("judge.draw", framework.judge.draw)):
+        for guard in guards:
+            check_guard(guard, label)
+    if not framework.judge.active and not isinstance(state.get("hands"), dict):
+        warnings.append("no deterministic judge; agents must declare the outcome")
+    return errors, warnings

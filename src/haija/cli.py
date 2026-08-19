@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__
 from .config import ProjectConfig
 from .engine import Engine, render_export, run_game
-from .framework import load_framework
+from .framework import load_framework, validate_framework
 from .generate import generate_framework
 from .logging_setup import setup_logging
 from .project import new_project, projects_root
@@ -54,7 +54,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     try:
         fw = generate_framework(provider, args.prompt, name=cfg.name, observer=_observer)
-    except ProviderError as e:
+    except (ProviderError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     out = toml.parent / cfg.framework_path
@@ -71,6 +71,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("error: no agents configured in haija.toml", file=sys.stderr)
         return 1
     fw = load_framework(toml.parent / cfg.framework_path)
+    errors, warnings = validate_framework(fw)
+    for warning in warnings:
+        print(f"warning: {warning}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
     if args.turns:
         fw.turn.max_turns = args.turns
     provider = ChatProvider(cfg.model)
@@ -88,6 +95,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
     toml = _resolve_project(args.project)
     cfg = ProjectConfig.load(toml)
     fw = load_framework(toml.parent / cfg.framework_path)
+    errors, warnings = validate_framework(fw)
+    for warning in warnings:
+        print(f"warning: {warning}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
     print(
         f"OK: framework '{fw.name}' — {len(fw.actions)} action(s), "
         f"{len(fw.rules)} rule(s), {len(cfg.agents)} agent(s)"

@@ -108,12 +108,14 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
     inbox = engine.unread_messages(agent.name)
     user = (
         f"Turn {engine.turn}.\n\nCurrent game state (authoritative):\n"
-        f"{json.dumps(engine.public_state(), indent=2)}\n"
+        f"{json.dumps(engine.public_state(agent.name), indent=2)}\n"
         f"{_format_inbox(inbox)}\n"
         f"\nShared transcript:\n{format_transcript(engine.messages)}"
     )
     messages.append({"role": "user", "content": user})
     tools = all_tools(framework)
+    repeated_call: tuple[str, str] | None = None
+    repeated_count = 0
 
     for _ in range(engine.max_steps_per_turn):
         if engine.stopped:
@@ -155,6 +157,11 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
                 result = engine.dispatch_tool(tc.name, tc.arguments, agent.name)
             except Exception as e:  # noqa: BLE001
                 result = json.dumps({"error": str(e)})
+            signature = (tc.name, json.dumps(tc.arguments, sort_keys=True))
+            if signature == repeated_call:
+                repeated_count += 1
+            else:
+                repeated_call, repeated_count = signature, 1
             engine.record(
                 {
                     "type": "tool_call",
@@ -194,6 +201,11 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
             messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": result}
             )
+            if repeated_count >= 3:
+                message = f"{agent.name}'s turn ended after repeating {tc.name} three times."
+                engine.emit({"type": "info", "message": message})
+                engine.messages.append({"from": agent.name, "type": "turn_end", "text": message})
+                return {"content": "(stalled turn ended)"}
             if tc.name == "end_turn":
                 return {"content": "(ended turn)"}
             if engine.outcome:
