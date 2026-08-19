@@ -41,6 +41,13 @@ prompt ──▶ generate ──▶ framework.json ──▶ engine (the "truth"
    results back to the truth. Turns advance until an agent declares an outcome
    or the turn limit is hit.
 
+**Framework generation** (`haija generate`) splits responsibility. Haija builds
+the deterministic envelope — `schema_version`, the project `name`, turn
+defaults, and structural normalization — while the model only authors the
+*content* (description, objective, rules, actions, initial state). The model's
+output is coerced into a valid shape on the way in, so it can't corrupt the
+file structure.
+
 ## Install
 
 Requires Python 3.11+. Zero runtime dependencies (stdlib only).

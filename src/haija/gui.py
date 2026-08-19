@@ -82,7 +82,7 @@ def _run_thread(state: HaijaState) -> None:
 def _generate_thread(state: HaijaState, prompt: str) -> None:
     try:
         provider = ChatProvider(state.cfg.model)
-        fw = generate_framework(provider, prompt)
+        fw = generate_framework(provider, prompt, name=state.cfg.name)
         out = state.toml_path.parent / state.cfg.framework_path
         out.write_text(json.dumps(fw.to_dict(), indent=2) + "\n", encoding="utf-8")
         state.fw = fw

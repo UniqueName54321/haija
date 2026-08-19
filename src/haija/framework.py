@@ -160,3 +160,129 @@ Effect rules:
   change state through these actions. The engine is the single source of truth.
 
 Return ONLY valid JSON. No markdown fences, no commentary."""
+
+
+def framework_content_instructions() -> str:
+    """Schema description for the *content* an LLM authors.
+
+    The model produces only the game-design fields; Haija fills in the envelope
+    (``name`` and ``schema_version``) and normalizes the result, so the model
+    can't corrupt the file's shape.
+    """
+    return """You are filling in the game-design *content* for a Haija framework.
+Return ONLY a JSON object with these fields (no markdown fences, no commentary):
+
+{
+  "description": "the world/premise, a few sentences",
+  "objective": "what the players are trying to achieve",
+  "rules": ["hard rules of the game", "..."],
+  "win_conditions": ["conditions that mean a player wins"],
+  "lose_conditions": ["conditions that mean a player loses"],
+  "initial_state": { "...": "the starting world state (JSON, may be nested)" },
+  "actions": [
+    {
+      "name": "action_name",
+      "description": "what this action does, written for the agent",
+      "parameters": {
+        "type": "object",
+        "properties": { "x": { "type": "string", "description": "..." } },
+        "required": ["x"]
+      },
+      "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ]
+    }
+  ],
+  "turn": { "order": "round_robin", "max_turns": 20 }
+}
+
+Effect rules:
+- "op" is one of: set (write a value), incr (add a number), append (add to a
+  list), remove (delete a key/index).
+- "path" is a dot-separated path into the state, e.g. "board.0" or
+  "players.Alice.hp". List indices are integers.
+- Path segments and values may contain templates: {{actor}}, {{mark}},
+  {{params.x}}, {{state.some.key}}, {{turn}}, {{now}}.
+- Every action agents need MUST be listed under "actions"; agents change state
+  only through actions. The engine is the single source of truth.
+
+Do NOT include "name" or "schema_version" — Haija supplies those."""
+
+
+def _as_str(value: Any) -> str:
+    return str(value) if value is not None else ""
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
+    """Coerce an AI-authored game-design object into a well-formed framework
+    body, filling deterministic defaults for anything missing or malformed."""
+    content = content or {}
+    actions: list[dict[str, Any]] = []
+    for a in content.get("actions") or []:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name", "")).strip()
+        if not name:
+            continue
+        params = a.get("parameters")
+        if not isinstance(params, dict):
+            params = {"type": "object", "properties": {}}
+        effects = a.get("effects")
+        if not isinstance(effects, list):
+            effects = []
+        actions.append(
+            {
+                "name": name,
+                "description": _as_str(a.get("description")),
+                "parameters": params,
+                "effects": [e for e in effects if isinstance(e, dict)],
+            }
+        )
+
+    turn = content.get("turn")
+    if not isinstance(turn, dict):
+        turn = {}
+    order = turn.get("order")
+    if order not in ("round_robin", "simultaneous"):
+        order = "round_robin"
+    try:
+        max_turns = int(turn.get("max_turns", 20))
+    except (TypeError, ValueError):
+        max_turns = 20
+
+    return {
+        "description": _as_str(content.get("description")),
+        "objective": _as_str(content.get("objective")),
+        "rules": _as_str_list(content.get("rules")),
+        "win_conditions": _as_str_list(content.get("win_conditions")),
+        "lose_conditions": _as_str_list(content.get("lose_conditions")),
+        "initial_state": _as_dict(content.get("initial_state")),
+        "actions": actions,
+        "turn": {"order": order, "max_turns": max_turns},
+    }
+
+
+def assemble_framework(name: str, content: dict[str, Any] | None) -> Framework:
+    """Assemble a full framework from a programmatic ``name`` plus AI content.
+
+    ``name`` (the project name) is authoritative; a stray model ``name`` is only
+    a fallback when no name is supplied.
+    """
+    body = normalize_content(content)
+    fallback = str((content or {}).get("name") or "").strip()
+    resolved_name = name.strip() or fallback or "Untitled Game"
+    return Framework.from_dict(
+        {"schema_version": SCHEMA_VERSION, "name": resolved_name, **body}
+    )

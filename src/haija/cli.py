@@ -39,7 +39,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     cfg = ProjectConfig.load(toml)
     provider = ChatProvider(cfg.model)
     try:
-        fw = generate_framework(provider, args.prompt)
+        fw = generate_framework(provider, args.prompt, name=cfg.name)
     except ProviderError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
