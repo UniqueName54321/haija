@@ -406,3 +406,45 @@ def test_repeated_identical_tool_calls_end_stalled_turn():
     cfg = ProjectConfig("G", [AgentSpec(name="A")], ModelConfig(api_key="x"))
     result = run_agent(Repeater(), cfg.agents[0], e, cfg)
     assert result == {"content": "(stalled turn ended)"}
+
+
+def test_uno_empty_generated_piles_are_built_and_dealt_without_setup_phase():
+    fw = Framework.from_dict({
+        "name": "UNO 3", "description": "Each player starts with 7 cards from a deck of 108 cards.",
+        "initial_state": {"draw_pile": [], "discard_pile": [], "hands": {}, "players": {}, "current_color": "", "direction": 1},
+        "actions": [],
+    })
+    e = Engine(fw, ["A", "B", "C", "D"])
+    assert all(len(e.state["hands"][name]) == 7 for name in e.agents)
+    assert len(e.state["draw_pile"]) == 79
+    assert len(e.state["discard_pile"]) == 1
+    assert e.state["current_color"] in ("Red", "Yellow", "Green", "Blue")
+
+
+def test_generated_index_card_effects_use_pre_removal_card_and_inverted_draw_guard_is_repaired():
+    reverse = {"color": "Blue", "number": None, "symbol": "Reverse"}
+    fw = Framework.from_dict({
+        "name": "UNO", "initial_state": {
+            "hands": {"A": [reverse, {"color": "Red", "number": 1, "symbol": ""}], "B": []},
+            "draw_pile": [{"color": "Green", "number": 2, "symbol": ""}],
+            "discard_pile": [{"color": "Blue", "number": 5, "symbol": ""}],
+            "current_color": "Blue", "direction": 1, "turn_index": 0,
+        }, "actions": [{
+            "name": "play_card", "parameters": {"type": "object", "properties": {"card_index": {"type": "integer"}}, "required": ["card_index"]},
+            "guard": [{"op": "exists", "path": "hands.{{actor}}.{{params.card_index}}"}],
+            "effects": [
+                {"op": "append", "path": "discard_pile", "value": "hands.{{actor}}.{{params.card_index}}"},
+                {"op": "remove", "path": "hands.{{actor}}.{{params.card_index}}"},
+                {"op": "if", "guard": [{"op": "eq", "path": "hands.{{actor}}.{{params.card_index}}.symbol", "value": "Reverse"}], "effects": [{"op": "reverse_direction"}]},
+            ],
+        }, {
+            "name": "draw_card", "effects": [{"op": "draw", "from": "draw_pile", "path": "hands.{{actor}}", "count": 1}],
+            "guard": [{"op": "not_exists", "path": "draw_pile"}],
+        }],
+    })
+    e = Engine(fw, ["A", "B"])
+    assert e.apply_action(fw.actions[0], "A", {"card_index": 0})["ok"]
+    assert e.state["discard_pile"][0] == reverse
+    assert e.state["direction"] == -1
+    assert e.apply_action(fw.actions[1], "A", {})["ok"]
+    assert len(e.state["hands"]["A"]) == 2

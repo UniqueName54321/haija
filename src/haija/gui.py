@@ -323,8 +323,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send_json({"ok": False, "message": str(e)})
             return
-        cfg = ProjectConfig.load(root / "haija.toml")
-        fw = load_framework(root / cfg.framework_path)
+        try:
+            cfg = ProjectConfig.load(root / "haija.toml")
+            fw = load_framework(root / cfg.framework_path)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"ok": False, "message": f"project was created but could not be loaded: {e}"})
+            return
         s = self.state
         s.cfg, s.toml_path, s.fw, s.project_dir = cfg, root / "haija.toml", fw, root
         self._send_json({"ok": True, "message": f"Created project '{name}' at {root}", "project": name})

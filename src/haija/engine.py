@@ -96,14 +96,20 @@ class Engine:
         no setup turn or deal tool, so resolve that declarative state before the
         first agent is called.
         """
-        if str(self.state.get("phase", "")).lower() != "setup":
-            return
-
         hands = self.state.get("hands")
         deck = next(
             (self.state[key] for key in ("deck", "draw_pile", "drawPile") if isinstance(self.state.get(key), list)),
             None,
         )
+        if isinstance(deck, list) and not deck and (self._is_uno_game() or self.state.get("deck_type") == "uno"):
+            deck.extend(self._uno_deck())
+        phase_is_setup = str(self.state.get("phase", "")).lower() == "setup"
+        undealt_card_game = (
+            isinstance(hands, dict) and isinstance(deck, list) and bool(deck)
+            and all(isinstance(hand, list) and not hand for hand in hands.values())
+        )
+        if not phase_is_setup and not undealt_card_game:
+            return
         if not isinstance(hands, dict) or not isinstance(deck, list):
             # A setup phase without declarative setup data must not trap agents
             # in an unwinnable polling loop.
@@ -141,7 +147,25 @@ class Engine:
                     if key in self.state:
                         self.state[key] = value
 
-        self.state["phase"] = "playing"
+        if "phase" in self.state:
+            self.state["phase"] = "playing"
+
+    def _is_uno_game(self) -> bool:
+        text = f"{self.framework.name} {self.framework.description}".lower()
+        return "uno" in text
+
+    @staticmethod
+    def _uno_deck() -> list[dict[str, Any]]:
+        deck: list[dict[str, Any]] = []
+        for color in ("Red", "Yellow", "Green", "Blue"):
+            deck.append({"color": color, "number": 0, "symbol": ""})
+            for number in range(1, 10):
+                deck.extend({"color": color, "number": number, "symbol": ""} for _ in range(2))
+            for symbol in ("Skip", "Reverse", "Draw Two"):
+                deck.extend({"color": color, "number": None, "symbol": symbol} for _ in range(2))
+        for symbol in ("Wild", "Wild Draw Four"):
+            deck.extend({"color": "", "number": None, "symbol": symbol} for _ in range(4))
+        return deck
 
     def _discard_pile(self) -> list[Any] | None:
         for key in ("discard_pile", "discard", "played_cards", "discardPile"):
@@ -286,18 +310,21 @@ class Engine:
         if param_error:
             return {"ok": False, "error": f"invalid parameters: {param_error}"}
         ctx = self._ctx(actor, params)
+        played_card = self._selected_card(actor, params)
         if action.guard:
-            passed, reason = evaluate_guards(action.guard, ctx)
+            passed, reason = self._evaluate_action_guards(action, actor, params, ctx, played_card)
             if not passed:
                 LOG.warning("guard rejected %s.%s(%s): %s", actor, action.name, params, reason)
                 return {"ok": False, "error": f"illegal move: {reason}"}
         snapshot = copy.deepcopy(self.state)
+        ctx["before_state"] = snapshot
+        ctx["_removed_paths"] = set()
         advanced_before = self._advanced_this_turn
         results = []
         try:
             for eff in action.effects:
                 results.append(self._apply_one(eff, ctx))
-            self._resolve_conventional_card_effects(action, actor, params)
+            self._resolve_conventional_card_effects(action, actor, params, played_card)
         except Exception as exc:  # action effects are an atomic transaction
             self.state = snapshot
             self._advanced_this_turn = advanced_before
@@ -317,6 +344,54 @@ class Engine:
         if touched_hand:
             self._check_empty_hand_win(actor)
         return {"ok": True, "effects": results, "state": self.public_state(actor)}
+
+    def _selected_card(self, actor: str, params: dict[str, Any]) -> Any:
+        hands = self.state.get("hands")
+        hand = hands.get(actor) if isinstance(hands, dict) else None
+        if not isinstance(hand, list):
+            return None
+        if isinstance(params.get("card_index"), int):
+            index = params["card_index"]
+            return copy.deepcopy(hand[index]) if -len(hand) <= index < len(hand) else None
+        card = params.get("card")
+        return copy.deepcopy(card) if card in hand else None
+
+    def _evaluate_action_guards(self, action: Action, actor: str, params: dict[str, Any], ctx: dict[str, Any], card: Any) -> tuple[bool, str]:
+        # Generated UNO frameworks have historically over-constrained play_card
+        # with an unconditional color check. Enforce the actual rule centrally.
+        if self._is_uno_game() and action.name == "play_card" and isinstance(card, dict):
+            return self._uno_card_is_legal(actor, card), "card must match color, number, symbol, or be a legal Wild"
+        if self._is_uno_game() and action.name.startswith("draw"):
+            source = self.state.get("draw_pile")
+            hand = self.state.get("hands", {}).get(actor, [])
+            if not source:
+                return False, "draw pile is empty"
+            if any(self._uno_card_is_legal(actor, candidate) for candidate in hand):
+                return False, "a playable card is already in hand"
+            return True, "no playable card; draw is legal"
+        # Repair the common inverted generated draw guard.
+        if action.name.startswith("draw") and all(g.get("op") == "not_exists" for g in action.guard):
+            source = next((self.state.get(g.get("path", "")) for g in action.guard), None)
+            return bool(source), "draw pile is empty"
+        return evaluate_guards(action.guard, ctx)
+
+    def _uno_card_is_legal(self, actor: str, card: Any) -> bool:
+        if not isinstance(card, dict):
+            return False
+        color, value = self._card_attributes(card)
+        symbol = card.get("symbol", "")
+        current_color = self.state.get("current_color")
+        discard = self._discard_pile() or []
+        top = discard[0] if discard else None
+        top_color, top_value = self._card_attributes(top)
+        top_symbol = top.get("symbol", "") if isinstance(top, dict) else ""
+        legal = not discard or "Wild" in symbol or color == (current_color or top_color) or (value is not None and value == top_value) or (symbol and symbol == top_symbol)
+        if "Wild Draw Four" in symbol and current_color:
+            hand = self.state.get("hands", {}).get(actor, [])
+            legal = legal and not any(
+                isinstance(other, dict) and other.get("color") == current_color for other in hand
+            )
+        return legal
 
     @staticmethod
     def _validate_params(action: Action, params: dict[str, Any]) -> str | None:
@@ -377,9 +452,23 @@ class Engine:
         raw = eff.get("value")
         segs = resolve_path(path, ctx)
         value = resolve_value(raw, ctx)
+        if isinstance(raw, str) and "{{" in raw and isinstance(value, str):
+            # Models sometimes emit a rendered state path as an effect value.
+            # Dereference it before mutations (e.g. playing a card by index).
+            try:
+                value = copy.deepcopy(self._navigate(value.split(".")))
+            except (KeyError, IndexError, ValueError, TypeError):
+                pass
 
         if op == "if":
-            passed, _ = evaluate_guards(eff.get("guard", []), ctx)
+            guards = eff.get("guard", [])
+            rendered_guard_paths = [".".join(resolve_path(g.get("path", ""), ctx)) for g in guards if isinstance(g, dict) and g.get("path")]
+            removed = ctx.get("_removed_paths", set())
+            use_before = any(any(p == old or p.startswith(old + ".") for old in removed) for p in rendered_guard_paths)
+            guard_ctx = ctx
+            if use_before:
+                guard_ctx = {**ctx, "state": ctx["before_state"]}
+            passed, _ = evaluate_guards(guards, guard_ctx)
             branch = eff.get("effects" if passed else "else", [])
             applied = [self._apply_one(item, ctx) for item in branch]
             return {"op": "if", "passed": passed, "effects": applied}
@@ -395,7 +484,10 @@ class Engine:
             return {"op": "incr", "path": path, "delta": delta}
         if op == "append":
             target = self._navigate(segs)
-            target.append(value)
+            if self._is_discard_path(segs):
+                target.insert(0, value)
+            else:
+                target.append(value)
             return {"op": "append", "path": path, "value": value}
         if op == "remove":
             parent, key = self._parent_key(segs)
@@ -403,6 +495,7 @@ class Engine:
                 del parent[key]
             else:
                 parent.pop(key, None)
+            ctx.get("_removed_paths", set()).add(".".join(segs))
             return {"op": "remove", "path": path}
         if op == "shuffle":
             target = self._navigate(segs)
@@ -436,15 +529,38 @@ class Engine:
             return {"op": op, "turn_index": self.state["turn_index"]}
         raise ValueError(f"unknown effect op: {op}")
 
-    def _resolve_conventional_card_effects(self, action: Action, actor: str, params: dict[str, Any]) -> None:
+    def _resolve_conventional_card_effects(self, action: Action, actor: str, params: dict[str, Any], played_card: Any = None) -> None:
         """Compatibility for generated card frameworks predating turn effects."""
         if not isinstance(self.state.get("hands"), dict) or self._discard_pile() is None:
             return
-        card = params.get("card")
-        if not isinstance(card, str):
+        card = played_card if played_card is not None else params.get("card")
+        if not isinstance(card, (str, dict)):
             return
-        declared = {e.get("op") for e in action.effects}
-        lower = card.lower()
+        def effect_ops(effects: list[dict[str, Any]]) -> set[str]:
+            found: set[str] = set()
+            for effect in effects:
+                found.add(effect.get("op", "set"))
+                found.update(effect_ops(effect.get("effects", [])))
+                found.update(effect_ops(effect.get("else", [])))
+            return found
+
+        declared = effect_ops(action.effects)
+        symbol = card.get("symbol", "") if isinstance(card, dict) else card
+        lower = str(symbol).lower()
+        color, value = self._card_attributes(card)
+        chosen = params.get("chosen_color") or params.get("new_color")
+        active_color = chosen if "wild" in lower and chosen else color
+        if active_color:
+            for key in ("current_color", "active_color"):
+                if key in self.state:
+                    self.state[key] = active_color
+        if value is not None:
+            for key in ("current_number", "current_value"):
+                if key in self.state:
+                    self.state[key] = value
+        for key in ("current_card", "top_card"):
+            if key in self.state:
+                self.state[key] = copy.deepcopy(card)
         if "reverse" in lower and "reverse_direction" not in declared:
             self.state["direction"] = -int(self.state.get("direction", 1) or 1)
         draw_count = 4 if ("wild4" in lower or "draw4" in lower or "+4" in lower) else 2 if ("draw2" in lower or "+2" in lower) else 0
@@ -465,10 +581,10 @@ class Engine:
             if not deck:
                 discard = self._discard_pile()
                 if discard and len(discard) > 1:
-                    top = discard.pop()
+                    top = discard.pop(0)
                     deck.extend(discard)
                     discard.clear()
-                    discard.append(top)
+                    discard.insert(0, top)
                     self._rng.shuffle(deck)
             if not deck:
                 break
@@ -488,6 +604,10 @@ class Engine:
             else:
                 cur = cur[seg]
         return cur
+
+    @staticmethod
+    def _is_discard_path(segs: list[str]) -> bool:
+        return len(segs) == 1 and segs[0] in ("discard_pile", "discard", "played_cards", "discardPile")
 
     def _parent_key(self, segs: list[str]) -> tuple[Any, Any]:
         parent = self._navigate(segs[:-1])

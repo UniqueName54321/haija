@@ -24,6 +24,9 @@ def projects_root() -> Path:
 
 
 def new_project(name: str, dest: Path | None = None) -> Path:
+    name = name.strip()
+    if not name or Path(name).is_absolute() or any(ch in name for ch in ("/", "\\", ":")) or name in (".", ".."):
+        raise ValueError("project name must be a simple name; put the filesystem path in Directory")
     dest = dest or projects_root()
     root = dest / name
     root.mkdir(parents=True, exist_ok=False)

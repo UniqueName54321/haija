@@ -1,9 +1,11 @@
 import json
+import tomllib
 from pathlib import Path
 
 from haija.framework import Framework, assemble_framework, load_framework, normalize_content, validate_framework
 from haija.generate import generate_framework
 from haija.provider import ChatResponse
+from haija.config import default_config
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -110,3 +112,8 @@ def test_semantic_framework_validation_rejects_bad_effect_graph():
     errors, _ = validate_framework(fw)
     assert any("unknown effect op" in error for error in errors)
     assert any("setup phase requires" in error for error in errors)
+
+
+def test_default_config_escapes_windows_paths_and_toml_special_characters():
+    name = r'C:\Users\smurf\Games\"UNO"'
+    assert tomllib.loads(default_config(name))["name"] == name

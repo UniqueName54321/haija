@@ -273,7 +273,7 @@ def dump_config(cfg: ProjectConfig) -> str:
 def default_config(name: str) -> str:
     """Return the TOML text for a freshly scaffolded project."""
     return f'''# Haija project configuration
-name = "{name}"
+name = {_tstr(name)}
 # tone = "light-hearted"        # optional: a tone applied to ALL agents
 
 max_steps_per_turn = 16

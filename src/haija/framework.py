@@ -241,6 +241,12 @@ Effect rules:
 - if: {"op":"if","guard":[...],"effects":[...],"else":[...]}.
 - Use reverse_direction, skip_next, and draw effects for action cards; prose
   rules alone do not mutate state. The engine advances ordinary turns.
+- For UNO, set `deck_type` to `"uno"`; Haija constructs/shuffles the standard
+  108-card deck and deals it. Never represent an intended full deck as `[]`.
+- A draw action guard must use `length_gt` on the draw pile with value 0. Do
+  NOT use `not_exists`: an existing draw pile is required, not forbidden.
+- Capture or append a selected list item before removing it. Conditional card
+  effects must inspect the selected card as it existed before removal.
 - "path" is a dot-separated path into the state, e.g. "board.0" or
   "players.Alice.hp". List indices are integers.
 - Path segments and values may contain templates: {{actor}}, {{mark}},
@@ -418,7 +424,7 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
         if action.name in names:
             errors.append(f"duplicate action name '{action.name}'")
         names.add(action.name)
-        if not action.effects:
+        if not action.effects and not action.name.lower().startswith(("say_", "pass", "end_")):
             warnings.append(f"action '{action.name}' has no effects")
         for guard in action.guard:
             check_guard(guard, f"action '{action.name}'")
@@ -428,7 +434,7 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
         warnings.append("framework has no game actions")
     state = framework.initial_state
     if str(state.get("phase", "")).lower() == "setup":
-        has_deck = any(isinstance(state.get(k), list) for k in ("deck", "draw_pile", "drawPile"))
+        has_deck = state.get("deck_type") == "uno" or any(isinstance(state.get(k), list) for k in ("deck", "draw_pile", "drawPile"))
         if not isinstance(state.get("hands"), dict) or not has_deck:
             errors.append("setup phase requires hands plus a deck/draw_pile")
     if framework.turn.max_turns <= 0:

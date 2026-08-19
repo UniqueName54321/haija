@@ -29,7 +29,11 @@ def _resolve_project(p: str) -> Path:
 
 def cmd_new(args: argparse.Namespace) -> int:
     dest = Path(args.dir) if args.dir else projects_root()
-    root = new_project(args.name, dest)
+    try:
+        root = new_project(args.name, dest)
+    except (ValueError, FileExistsError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(f"Created Haija project '{args.name}' at {root}")
     print("Next: set OPENROUTER_API_KEY, then `haija generate \"<prompt>\"` and `haija run`.")
     return 0
