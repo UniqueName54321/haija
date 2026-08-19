@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .config import ProjectConfig
+from .config import PROVIDER_DEFAULTS, ProjectConfig
 from .engine import Engine, run_game
 from .framework import load_framework, validate_framework
 from .generate import generate_framework
 from .logging_setup import setup_logging
 from .project import new_project, projects_root
-from .provider import ChatProvider, ProviderError
+from .provider import ProviderError, create_provider
 
 LOG = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class HaijaState:
     events: list[dict[str, Any]] = field(default_factory=list)
     busy: bool = False
     worker_thread: threading.Thread | None = None
-    provider: ChatProvider | None = None
+    provider: Any = None
     stop_requested: bool = False
 
     def add_event(self, event: dict[str, Any]) -> None:
@@ -67,7 +67,7 @@ def _read_index_html() -> str:
 
 def _run_thread(state: HaijaState) -> None:
     try:
-        provider = ChatProvider(state.cfg.model)
+        provider = create_provider(state.cfg.model)
         state.provider = provider
         engine = Engine(
             state.fw,
@@ -91,7 +91,7 @@ def _run_thread(state: HaijaState) -> None:
 
 def _generate_thread(state: HaijaState, prompt: str) -> None:
     try:
-        provider = ChatProvider(state.cfg.model)
+        provider = create_provider(state.cfg.model)
         state.provider = provider
         fw = generate_framework(provider, prompt, name=state.cfg.name, observer=state.add_event)
         out = state.toml_path.parent / state.cfg.framework_path
@@ -439,12 +439,25 @@ class Handler(BaseHTTPRequestHandler):
         cfg = s.cfg
         if "tone" in body and body["tone"] is not None:
             cfg.tone = (body["tone"] or "").strip()
+        if body.get("provider"):
+            provider_name = body["provider"].strip().lower()
+            if provider_name not in PROVIDER_DEFAULTS:
+                self._send_json({
+                    "ok": False,
+                    "message": "unknown provider; choose " + ", ".join(PROVIDER_DEFAULTS),
+                })
+                return
+            if provider_name != cfg.model.provider:
+                cfg.model.model, cfg.model.base_url, cfg.model.api_key_env = (
+                    PROVIDER_DEFAULTS[provider_name]
+                )
+            cfg.model.provider = provider_name
         if body.get("model"):
             cfg.model.model = body["model"].strip()
-        if body.get("base_url"):
-            cfg.model.base_url = body["base_url"].strip()
-        if body.get("api_key_env"):
-            cfg.model.api_key_env = body["api_key_env"].strip()
+        if "base_url" in body:
+            cfg.model.base_url = (body["base_url"] or "").strip()
+        if "api_key_env" in body:
+            cfg.model.api_key_env = (body["api_key_env"] or "").strip()
         if body.get("enabled_archetypes") is not None:
             enabled = set(body["enabled_archetypes"])
             for arch_id in list(cfg.all_archetypes()):

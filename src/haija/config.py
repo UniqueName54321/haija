@@ -19,6 +19,13 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_API_KEY_ENV = "OPENROUTER_API_KEY"
 
+PROVIDER_DEFAULTS = {
+    "openrouter": (DEFAULT_MODEL, DEFAULT_BASE_URL, DEFAULT_API_KEY_ENV),
+    "openai": ("gpt-5.6-luna", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "anthropic": ("claude-sonnet-5", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    "codex_subscription": ("gpt-5.3-codex", "", ""),
+}
+
 # Per-agent thinking depth, mapped to the provider's `reasoning` parameter.
 # "low" = fast/shallow, "medium" = balanced, "high" = deep/thorough, "off" = none.
 THINKING_LEVELS = ("off", "low", "medium", "high")
@@ -147,12 +154,14 @@ class ProjectConfig:
     def load(cls, path: Path) -> "ProjectConfig":
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         model_raw = data.get("model", {})
+        provider_name = str(model_raw.get("provider", "openrouter")).lower()
+        defaults = PROVIDER_DEFAULTS.get(provider_name, PROVIDER_DEFAULTS["openrouter"])
         model = ModelConfig(
-            provider=model_raw.get("provider", "openrouter"),
-            model=model_raw.get("model", DEFAULT_MODEL),
-            base_url=model_raw.get("base_url", DEFAULT_BASE_URL),
+            provider=provider_name,
+            model=model_raw.get("model", defaults[0]),
+            base_url=model_raw.get("base_url", defaults[1]),
             api_key=model_raw.get("api_key"),
-            api_key_env=model_raw.get("api_key_env", DEFAULT_API_KEY_ENV),
+            api_key_env=model_raw.get("api_key_env", defaults[2]),
         )
         agents = [
             AgentSpec(

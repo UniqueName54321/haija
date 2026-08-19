@@ -256,6 +256,179 @@ def test_generation_prompt_requires_playable_initial_state():
     assert "unresolved setup/loading/dealing phase" in system
 
 
+def test_generation_repairs_validation_failure_and_rechecks():
+    from haija.generate import generate_framework
+    from haija.provider import ChatResponse
+
+    invalid = {
+        "initial_state": {},
+        "actions": [{"name": "propose_change", "effects": [{"op": "move", "from": "deck"}]}],
+    }
+    repaired = {
+        "initial_state": {"deck": [1], "proposals": []},
+        "actions": [{"name": "propose_change", "effects": [
+            {"op": "move", "from": "deck", "path": "proposals"}
+        ]}],
+    }
+
+    class FakeProvider:
+        def __init__(self):
+            self.responses = [invalid, repaired]
+            self.calls = []
+
+        def chat(self, messages, **kwargs):
+            self.calls.append(messages.copy())
+            return ChatResponse(content=json.dumps(self.responses.pop(0)))
+
+    provider = FakeProvider()
+    fw = generate_framework(provider, "Nomic", name="Nomic")
+    assert len(provider.calls) == 2
+    repair_prompt = provider.calls[1][-1]["content"]
+    assert "effect 'move' requires a path" in repair_prompt
+    assert fw.actions[0].effects[0]["path"] == "proposals"
+
+
+def test_generation_reports_repair_progress_events():
+    from haija.generate import generate_framework
+
+    outputs = iter([
+        json.dumps({"initial_state": {}, "actions": [
+            {"name": "bad", "effects": [{"op": "move", "from": "deck"}]}
+        ]}),
+        json.dumps({"initial_state": {}, "actions": []}),
+    ])
+
+    class FakeProvider:
+        def chat_stream(self, messages, **kwargs):
+            yield next(outputs)
+
+    events = []
+    generate_framework(FakeProvider(), "repair me", observer=events.append)
+    types = [event["type"] for event in events]
+    assert "generate_validation_failed" in types
+    assert "generate_repair_start" in types
+    assert types[-1] == "generate_done"
+
+
+def test_provider_factory_and_provider_defaults(tmp_path):
+    from haija.config import ModelConfig, ProjectConfig
+    from haija.provider import AnthropicProvider, ChatProvider, CodexSubscriptionProvider, create_provider
+
+    assert isinstance(create_provider(ModelConfig(provider="openai", api_key="x")), ChatProvider)
+    assert isinstance(create_provider(ModelConfig(provider="anthropic", api_key="x")), AnthropicProvider)
+    assert isinstance(create_provider(ModelConfig(provider="codex_subscription")), CodexSubscriptionProvider)
+
+    config_path = tmp_path / "haija.toml"
+    config_path.write_text('name = "T"\n[model]\nprovider = "anthropic"\n', encoding="utf-8")
+    config = ProjectConfig.load(config_path)
+    assert config.model.model == "claude-sonnet-5"
+    assert config.model.base_url == "https://api.anthropic.com"
+    assert config.model.api_key_env == "ANTHROPIC_API_KEY"
+
+
+def test_openai_direct_uses_openai_headers_and_reasoning_effort():
+    from haija.config import ModelConfig
+    from haija.provider import ChatProvider
+
+    provider = ChatProvider(ModelConfig(provider="openai", api_key="test"))
+    headers = provider._headers()
+    assert "HTTP-Referer" not in headers
+    payload = {}
+    provider._add_reasoning(payload, {"effort": "high"})
+    assert payload == {"reasoning_effort": "high"}
+
+
+def test_anthropic_adapter_converts_tools_and_tool_results():
+    from haija.config import ModelConfig
+    from haija.provider import AnthropicProvider
+
+    provider = AnthropicProvider(ModelConfig(provider="anthropic", api_key="test"))
+    payload = provider._payload(
+        [
+            {"role": "system", "content": "rules"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call-1",
+                "function": {"name": "play", "arguments": '{"card":"G4"}'},
+            }]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        ],
+        tools=[{"type": "function", "function": {
+            "name": "play", "description": "Play", "parameters": {"type": "object"},
+        }}],
+    )
+    assert payload["system"] == "rules"
+    assert payload["messages"][0]["content"][0]["type"] == "tool_use"
+    assert payload["messages"][1]["content"][0]["type"] == "tool_result"
+    assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert payload["thinking"]["type"] == "adaptive"
+
+
+def test_codex_subscription_provider_uses_ephemeral_read_only_cli(monkeypatch):
+    from haija.config import ModelConfig
+    from haija.provider import CodexSubscriptionProvider
+
+    captured = {}
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+
+        def communicate(self, prompt, timeout):
+            captured["prompt"] = prompt
+            output = Path(captured["command"][captured["command"].index("-o") + 1])
+            output.write_text(
+                json.dumps({
+                    "content": "playing",
+                    "reasoning": "",
+                    "tool_calls": [{"id": "1", "name": "play", "arguments": {"x": 1}}],
+                }),
+                encoding="utf-8",
+            )
+            return "", ""
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 1
+
+    monkeypatch.setattr("haija.provider.shutil.which", lambda name: "codex")
+    monkeypatch.setattr(
+        "haija.provider.subprocess.run",
+        lambda *args, **kwargs: type("Status", (), {
+            "returncode": 0, "stdout": "Logged in using ChatGPT", "stderr": ""
+        })(),
+    )
+    monkeypatch.setattr("haija.provider.subprocess.Popen", Process)
+    provider = CodexSubscriptionProvider(
+        ModelConfig(provider="codex_subscription", model="gpt-5.3-codex")
+    )
+    response = provider.chat([{"role": "user", "content": "go"}], tools=[])
+    command = captured["command"]
+    assert command[:5] == ["codex", "exec", "--ephemeral", "--sandbox", "read-only"]
+    assert "--skip-git-repo-check" in command
+    assert response.tool_calls[0].arguments == {"x": 1}
+
+
+def test_codex_subscription_provider_rejects_api_key_login(monkeypatch):
+    import pytest
+    from haija.config import ModelConfig
+    from haija.provider import CodexSubscriptionProvider, ProviderError
+
+    monkeypatch.setattr("haija.provider.shutil.which", lambda name: "codex")
+    monkeypatch.setattr(
+        "haija.provider.subprocess.run",
+        lambda *args, **kwargs: type("Status", (), {
+            "returncode": 0, "stdout": "Logged in using an API key", "stderr": ""
+        })(),
+    )
+    provider = CodexSubscriptionProvider(ModelConfig(provider="codex_subscription"))
+    with pytest.raises(ProviderError, match="not signed in with ChatGPT"):
+        provider.chat([{"role": "user", "content": "go"}])
+
+
 def test_run_agent_stops_before_calling_provider():
     from haija.agents import run_agent
     from haija.config import AgentSpec, ProjectConfig

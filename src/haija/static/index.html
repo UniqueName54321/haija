@@ -152,10 +152,11 @@
   .modal h2 { margin: 0 0 12px; font-size: 16px; }
   .modal .row { margin-bottom: 10px; }
   .modal label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
-  .modal input[type="text"] {
+  .modal input[type="text"], .modal select {
     width: 100%; padding: 8px; border-radius: 7px;
     background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
   }
+  .provider-help { color: var(--muted); font-size: 12px; line-height: 1.4; margin-top: 5px; }
   .arch-list {
     max-height: 240px; overflow-y: auto;
     border: 1px solid var(--border); border-radius: 7px; padding: 6px;
@@ -282,7 +283,17 @@
     </div>
     <div class="tab-panel" id="tab-model">
       <div class="row">
-        <label>Model (default provider is OpenRouter)</label>
+        <label>Provider</label>
+        <select id="opt-provider">
+          <option value="openrouter">OpenRouter</option>
+          <option value="openai">OpenAI API (direct)</option>
+          <option value="anthropic">Anthropic API</option>
+          <option value="codex_subscription">OpenAI Codex (local subscription login)</option>
+        </select>
+        <div class="provider-help" id="opt-provider-help"></div>
+      </div>
+      <div class="row">
+        <label>Model</label>
         <input type="text" id="opt-model" placeholder="model id" />
       </div>
       <div class="row">
@@ -344,6 +355,26 @@ let polling = false;
 let activeChannel = 'table';
 const channels = new Map([['table', $('log')]]);
 const streamMessages = new Map();
+const PROVIDERS = {
+  openrouter: {model:'deepseek/deepseek-v4-flash', base:'https://openrouter.ai/api/v1', env:'OPENROUTER_API_KEY', help:'OpenAI-compatible routing through OpenRouter.'},
+  openai: {model:'gpt-5.6-luna', base:'https://api.openai.com/v1', env:'OPENAI_API_KEY', help:'Direct OpenAI API access. Usage is billed to the API key.'},
+  anthropic: {model:'claude-sonnet-5', base:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', help:'Direct Anthropic Messages API access.'},
+  codex_subscription: {model:'gpt-5.3-codex', base:'', env:'', help:'Uses a local Codex CLI ChatGPT login and its plan limits. API-key logins are rejected; run “codex login” and choose ChatGPT.'},
+};
+
+function updateProviderFields(reset = false) {
+  const selected = $('opt-provider').value;
+  const defaults = PROVIDERS[selected] || PROVIDERS.openrouter;
+  if (reset) {
+    $('opt-model').value = defaults.model;
+    $('opt-base-url').value = defaults.base;
+    $('opt-api-key-env').value = defaults.env;
+  }
+  const local = selected === 'codex_subscription';
+  $('opt-base-url').disabled = local;
+  $('opt-api-key-env').disabled = local;
+  $('opt-provider-help').textContent = defaults.help;
+}
 
 async function api(path, method = 'GET', body = null) {
   const opts = { method };
@@ -440,6 +471,8 @@ function formatEvent(ev) {
   if (t === 'error') return `[error] ${ev.message}`;
   if (t === 'generate_start') return `[generate] Generating framework…`;
   if (t === 'generate_stream') return '';
+  if (t === 'generate_validation_failed') return `[generate] Validation failed: ${(ev.errors || []).join('; ')}`;
+  if (t === 'generate_repair_start') return `[generate] Attempting automatic repair (${ev.attempt}/${ev.max_attempts})…`;
   if (t === 'generate_done') return `[generate] Framework ready — ${(ev.framework && ev.framework.actions && ev.framework.actions.length) || 0} action(s).`;
   if (t === 'done') return '';
   return JSON.stringify(ev);
@@ -546,6 +579,10 @@ function poll() {
         gs.textContent = ev.full;
         gs.scrollTop = gs.scrollHeight;
       }
+      if (ev.type === 'generate_repair_start') {
+        const gs = $('gen-stream');
+        if (gs) gs.textContent = '';
+      }
       if (ev.type === 'generate_done' || ev.type === 'done') {
         const gs = $('gen-stream');
         if (gs) gs.remove();
@@ -618,11 +655,13 @@ async function doExport() {
 async function openOptions() {
   const s = await loadStatus();
   $('opt-tone').value = s.tone || '';
+  $('opt-provider').value = s.model_provider || 'openrouter';
   $('opt-model').value = s.model_model || '';
   $('opt-base-url').value = s.model_base_url || '';
   $('opt-api-key-env').value = s.model_api_key_env || '';
   $('opt-log-level').value = s.log_level || 'info';
   $('opt-log-file').value = s.log_file || '';
+  updateProviderFields(false);
   const list = $('opt-archs');
   list.innerHTML = '';
   (s.archetypes || []).forEach(a => {
@@ -664,6 +703,7 @@ async function saveOptions() {
   document.querySelectorAll('#opt-agents select').forEach(sel => { agentThinking[sel.dataset.agent] = sel.value; });
   const r = await api('/api/options', 'POST', {
     tone: $('opt-tone').value,
+    provider: $('opt-provider').value,
     model: $('opt-model').value,
     base_url: $('opt-base-url').value,
     api_key_env: $('opt-api-key-env').value,
@@ -806,6 +846,7 @@ $('btn-clear').onclick = clearLog;
 document.querySelector('.channel-tab[data-channel="table"]').onclick = () => switchChannel('table');
 $('opt-cancel').onclick = closeOptions;
 $('opt-save').onclick = saveOptions;
+$('opt-provider').addEventListener('change', () => updateProviderFields(true));
 $('opts-overlay').addEventListener('click', (e) => { if (e.target === $('opts-overlay')) closeOptions(); });
 // Options tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {

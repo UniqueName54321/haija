@@ -14,7 +14,7 @@ calls.
 - 🤖 **Customizable agents** — each agent gets its own name, personality, model, and thinking depth.
 - 🎭 **Archetypes** — 9 built-in personalities (Normie, Chaos, Cheat, Baddie, Speedrunner, Completionist, Lawyer, Scientist, Contrarian). Enable/disable them or write your own.
 - 🎚️ **Game tone** — one tone applied to every agent, set from the options menu.
-- 🔌 **OpenRouter by default** — any OpenAI-compatible endpoint works too.
+- 🔌 **Multiple providers** — OpenRouter, direct OpenAI, Anthropic, or a locally signed-in Codex subscription session.
 - 💬 **Agents talk to each other** — `send_message` lets agents coordinate, negotiate, and bluff mid-game, with a per-agent inbox.
 - 🖥️ **Browser GUI** — `haija gui` starts a local server and opens a web UI in your browser (no Tkinter, full CLI parity).
 - 📄 **Export the whole run** — responses, tool calls, and chain-of-thought, saved as a human-readable `.txt`.
@@ -23,7 +23,7 @@ calls.
 - 🛡️ **Rule guards** — actions can declare preconditions; illegal moves are rejected by the engine.
 - 🕵️ **Hidden info & memory** — per-agent private memory, plus alliances between agents.
 - 📝 **Logging** — configurable log level and file (debug/info/warning/error) via the Options menu or CLI.
-- ⚡ **Streaming generation** — framework generation streams progress live in the CLI and GUI.
+- ⚡ **Streaming + self-repairing generation** — generation streams live, validates its result, and automatically repairs malformed frameworks up to three times.
 
 ## How it works
 
@@ -51,7 +51,10 @@ the deterministic envelope — `schema_version`, the project `name`, turn
 defaults, and structural normalization — while the model only authors the
 *content* (description, objective, rules, actions, initial state). The model's
 output is coerced into a valid shape on the way in, so it can't corrupt the
-file structure.
+file structure. Haija then performs executable validation. If generation emits
+an invalid effect or path, it sends the exact validator diagnostics back to the
+model, requests a focused repair, and revalidates the complete framework (up to
+three repair attempts) before failing.
 
 ## Install
 
@@ -233,7 +236,28 @@ haija options --log-level debug --log-file ./debug.log
 
 `haija generate` and the GUI's **Generate** button both stream the model's
 output in real time. The CLI shows progress dots; the GUI shows a live
-preview of the framework as it's being written.
+preview of the framework as it's being written. Validation and automatic repair
+attempts are reported in both interfaces.
+
+### Model providers
+
+Choose a provider in **Options → Model** or with `haija options --provider ...`:
+
+| Provider | Value | Authentication |
+|---|---|---|
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| OpenAI API | `openai` | `OPENAI_API_KEY` |
+| Anthropic API | `anthropic` | `ANTHROPIC_API_KEY` |
+| OpenAI Codex | `codex_subscription` | Local `codex login` session |
+
+Changing providers applies a suitable model, endpoint, and environment-variable
+default; each can still be overridden. Direct OpenAI and Anthropic use their API
+billing. The Codex option invokes the installed `codex` CLI with an ephemeral,
+read-only working directory, so Haija never copies account credentials. Its
+usage follows the ChatGPT account and plan the local CLI is signed into. To
+prevent accidental token billing, Haija rejects API-key Codex logins. Install
+Codex, run `codex login`, and choose ChatGPT subscription access before selecting
+this provider.
 
 ## Agent config
 

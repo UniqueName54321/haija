@@ -8,13 +8,13 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import ProjectConfig
+from .config import PROVIDER_DEFAULTS, ProjectConfig
 from .engine import Engine, render_export, run_game
 from .framework import load_framework, validate_framework
 from .generate import generate_framework
 from .logging_setup import setup_logging
 from .project import new_project, projects_root
-from .provider import ChatProvider, ProviderError
+from .provider import ProviderError, create_provider
 
 
 def _resolve_project(p: str) -> Path:
@@ -42,7 +42,7 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_generate(args: argparse.Namespace) -> int:
     toml = _resolve_project(args.project)
     cfg = ProjectConfig.load(toml)
-    provider = ChatProvider(cfg.model)
+    provider = create_provider(cfg.model)
 
     def _observer(ev):
         if ev["type"] == "generate_start":
@@ -53,6 +53,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 return
             # Print a dot per ~80 chars to show progress
             print(".", end="", flush=True)
+        elif ev["type"] == "generate_validation_failed":
+            print(" validation failed.", file=sys.stderr)
+            for error in ev.get("errors", []):
+                print(f"    ✗ {error}", file=sys.stderr)
+        elif ev["type"] == "generate_repair_start":
+            print(
+                f"  Attempting automatic repair "
+                f"({ev['attempt']}/{ev['max_attempts']})…",
+                file=sys.stderr,
+            )
+            print("  ", end="", flush=True)
         elif ev["type"] == "generate_done":
             print(" done.", file=sys.stderr)
 
@@ -84,7 +95,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     if args.turns:
         fw.turn.max_turns = args.turns
-    provider = ChatProvider(cfg.model)
+    provider = create_provider(cfg.model)
     engine = Engine(fw, [a.name for a in cfg.agents], max_steps_per_turn=cfg.max_steps_per_turn)
     try:
         msg = run_game(engine, provider, cfg)
@@ -241,14 +252,24 @@ def cmd_options(args: argparse.Namespace) -> int:
     if args.remove_archetype:
         cfg.remove_archetype(args.remove_archetype)
         changed = True
+    if args.provider:
+        provider_name = args.provider.strip().lower()
+        if provider_name not in PROVIDER_DEFAULTS:
+            print(
+                "error: provider must be one of " + ", ".join(PROVIDER_DEFAULTS),
+                file=sys.stderr,
+            )
+            return 1
+        cfg.model.provider = provider_name
+        cfg.model.model, cfg.model.base_url, cfg.model.api_key_env = (
+            PROVIDER_DEFAULTS[provider_name]
+        )
+        changed = True
     if args.model:
         cfg.model.model = args.model
         changed = True
-    if args.base_url:
+    if args.base_url is not None:
         cfg.model.base_url = args.base_url
-        changed = True
-    if args.provider:
-        cfg.model.provider = args.provider
         changed = True
     if args.api_key_env:
         cfg.model.api_key_env = args.api_key_env
@@ -328,7 +349,12 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--remove-archetype", default=None, metavar="ID", help="remove a custom archetype")
     o.add_argument("--model", default=None, help="set the default model")
     o.add_argument("--base-url", default=None, help="set the API base URL")
-    o.add_argument("--provider", default=None, help="set the provider name")
+    o.add_argument(
+        "--provider",
+        default=None,
+        choices=list(PROVIDER_DEFAULTS),
+        help="set the model provider",
+    )
     o.add_argument("--api-key-env", default=None, help="set the API key env var")
     o.add_argument("--agent-thinking", default=None, metavar="NAME=LEVEL[,...]", help="set per-agent thinking (off|low|medium|high|default), comma-separated")
     o.add_argument("--log-level", default=None, choices=["debug", "info", "warning", "error"], help="set log level")
