@@ -1,0 +1,20 @@
+# Haija project configuration
+name = "tic-tac-toe"
+
+[[agents]]
+name = "Alpha"
+description = "A careful, methodical player. Thinks a couple of moves ahead."
+
+[[agents]]
+name = "Beta"
+description = "An aggressive, opportunistic player. Goes for the win immediately."
+
+[model]
+provider = "openrouter"
+model = "meta-llama/llama-3.3-70b-instruct"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+
+max_steps_per_turn = 16
+framework_path = "framework.json"
+state_path = "state.json"

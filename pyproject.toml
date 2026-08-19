@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haija"
+version = "0.0.1"
+description = "Haija — an AI game engine where agents play the game. Generate a framework file from a prompt, then watch customizable agents play it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "UniqueName54321" }]
+keywords = ["ai", "game-engine", "agents", "llm", "openrouter", "tool-calling", "simulation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Games/Entertainment",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+haija = "haija.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/UniqueName54321/haija"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

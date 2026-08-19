@@ -1,0 +1,44 @@
+{
+  "schema_version": "1",
+  "name": "Tic-Tac-Toe",
+  "description": "Classic 3x3 grid. Two players alternate placing their mark (X or O) on an empty cell.",
+  "objective": "Get three of your marks in a row, column, or diagonal before your opponent does.",
+  "rules": [
+    "Players alternate turns.",
+    "A cell may be claimed only once.",
+    "The board is a 9-cell list, indexed 0-8, row-major (0-2 top row, 3-5 middle, 6-8 bottom)."
+  ],
+  "win_conditions": [
+    "You have three of your marks in a row, column, or diagonal."
+  ],
+  "lose_conditions": [
+    "Your opponent has three of their marks in a row, column, or diagonal."
+  ],
+  "initial_state": {
+    "board": [" ", " ", " ", " ", " ", " ", " ", " ", " "],
+    "marks": {"Alpha": "X", "Beta": "O"},
+    "winner": null
+  },
+  "actions": [
+    {
+      "name": "place_mark",
+      "description": "Place your mark on an empty cell. Cells are indexed 0-8 (row-major).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cell": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8,
+            "description": "Cell index 0-8 (row-major)."
+          }
+        },
+        "required": ["cell"]
+      },
+      "effects": [
+        {"op": "set", "path": "board.{{params.cell}}", "value": "{{mark}}"}
+      ]
+    }
+  ],
+  "turn": {"order": "round_robin", "max_turns": 9}
+}
