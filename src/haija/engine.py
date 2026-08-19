@@ -375,7 +375,7 @@ def run_game(
             if agent is None:
                 continue
             obs({"type": "turn_start", "turn": engine.turn, "agent": name})
-            run_agent(provider, agent, engine)
+            run_agent(provider, agent, engine, cfg)
             if engine.outcome:
                 break
 

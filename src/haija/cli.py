@@ -125,6 +125,39 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return gui_main()
 
 
+def cmd_archetypes(args: argparse.Namespace) -> int:
+    from .archetypes import BUILTIN_ARCHETYPES
+
+    built = list(BUILTIN_ARCHETYPES.values())
+    p = Path(args.project)
+    toml = p / "haija.toml" if p.is_dir() else p
+    cfg = None
+    if toml.exists():
+        try:
+            cfg = ProjectConfig.load(toml)
+        except Exception:
+            pass
+    print("Built-in archetypes:")
+    for arch in built:
+        mark = "✓" if (cfg and cfg.agent_for_archetype(arch.id)) else " "
+        print(f"  [{mark}] {arch.name:16s} ({arch.id}) — {arch.persona}")
+    if cfg and cfg.archetypes:
+        print("\nCustom archetypes (from haija.toml):")
+        for arch in cfg.archetypes.values():
+            mark = "✓" if cfg.agent_for_archetype(arch.id) else " "
+            print(f"  [{mark}] {arch.name:16s} ({arch.id}) — {arch.persona}")
+    if cfg and cfg.agents:
+        print(f"\nActive agents ({len(cfg.agents)}):")
+        for a in cfg.agents:
+            arch = f"({a.archetype})" if a.archetype else ""
+            print(f"  • {a.name} {arch}")
+            if a.description:
+                print(f"    {a.description}")
+    if cfg and cfg.tone:
+        print(f"\nGame tone: {cfg.tone}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="haija",
@@ -159,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
 
     gui = sub.add_parser("gui", help="launch the graphical interface")
     gui.set_defaults(func=cmd_gui)
+
+    arc = sub.add_parser("archetypes", help="list built-in and project archetypes")
+    arc.add_argument("--project", default=".", help="project directory or haija.toml path (optional)")
+    arc.set_defaults(func=cmd_archetypes)
 
     args = p.parse_args(argv)
     return args.func(args) or 0

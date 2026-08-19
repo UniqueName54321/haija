@@ -12,6 +12,8 @@ calls.
 - 🎲 **Prompt → framework** — `haija generate "a 1v1 wizard duel"` produces a machine-readable game.
 - 🧭 **The framework is the truth** — world state, rules, and win/lose conditions live in one file; agents can only see and change the world through tools.
 - 🤖 **Customizable agents** — each agent gets its own name, personality, and (optionally) model.
+- 🎭 **Archetypes** — 9 built-in personalities (Normie, Chaos, Cheat, Baddie, Speedrunner, Completionist, Lawyer, Scientist, Contrarian). Enable/disable them or write your own.
+- 🎚️ **Game tone** — one tone applied to every agent, set from the options menu.
 - 🔌 **OpenRouter by default** — any OpenAI-compatible endpoint works too.
 - 💬 **Agents talk to each other** — `send_message` lets agents coordinate, negotiate, and bluff mid-game, with a per-agent inbox.
 - 🖥️ **Basic GUI** — `haija gui` opens a Tkinter window to run and watch games live.
@@ -80,6 +82,7 @@ haija run
 | `haija gui` | Launch the graphical interface |
 | `haija export [-o out.txt]` | Export the last run as a human-readable `.txt` |
 | `haija validate` | Load and sanity-check the project's framework |
+| `haija archetypes` | List built-in + project archetypes and active agents |
 | `haija --version` | Print the version |
 
 All commands accept `--project <path>` (a project dir or a `haija.toml` path),
@@ -144,19 +147,33 @@ Paths and values support templates:
 
 ## Agent config
 
-Agents live in `haija.toml`:
+Agents live in `haija.toml`. Each can reference an **archetype** (a preset
+personality) and/or a freeform description, and a top-level **tone** is applied
+to every agent:
 
 ```toml
 name = "my-game"
+tone = "whimsical and cutthroat"     # applied to all agents
 
 [[agents]]
 name = "Alpha"
-description = "A careful, strategic player."
+archetype = "lawyer"                # exploits the wording of the rules
 
 [[agents]]
 name = "Beta"
-description = "An aggressive, risk-taking player."
-model = "openai/gpt-4o-mini"   # optional per-agent override
+archetype = "scientist"             # experiments to learn the mechanics
+description = "obsessively tidy"     # optional extra flavor
+model = "openai/gpt-4o-mini"         # optional per-agent override
+
+[[agents]]
+name = "Carla"                       # a plain agent with no archetype
+description = "A careful, strategic player."
+
+# Define your own archetypes:
+[[archetypes]]
+id = "comedy-guy"
+name = "ComedyGuy"
+persona = "Tries to turn every action into a punchline."
 
 [model]
 provider = "openrouter"
@@ -164,6 +181,28 @@ model = "meta-llama/llama-3.3-70b-instruct"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 ```
+
+## Archetypes & tone
+
+Haija ships nine preset **archetypes** — reusable personalities you can turn on
+or off per game, or replace with entirely custom ones:
+
+| Archetype | Behavior |
+|---|---|
+| `normie` (NormieAgent) | Plays normally — would like to win, but just has fun |
+| `chaos` (ChaosAgent) | Causes as much chaos as possible |
+| `cheat` (CheatAgent) | Prioritizes winning over anything |
+| `baddie` (BaddieAgent) | Tries to win, but is terribly bad at it |
+| `speedrunner` (SpeedrunnerAgent) | Finishes as fast as possible |
+| `completionist` (CompletionistAgent) | Does EVERYTHING |
+| `lawyer` (LawyerAgent) | Exploits the wording of the rules |
+| `scientist` (ScientistAgent) | Runs controlled experiments to learn the mechanics |
+| `contrarian` (ContrarianAgent) | Does the opposite of everyone else |
+
+Manage them (and the game **tone**) from the GUI's **Options → Archetypes & tone…**
+menu, which writes straight back to `haija.toml`. Toggling an archetype adds or
+removes it as an agent; "New archetype…" lets you define your own. From the
+terminal, `haija archetypes` lists what's available and what's active.
 
 ## Watching & exporting
 

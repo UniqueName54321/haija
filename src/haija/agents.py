@@ -15,17 +15,17 @@ from .provider import ChatProvider, ToolCall
 from .tools import all_tools
 
 
-def build_system_prompt(framework, agent: AgentSpec) -> str:
+def build_system_prompt(framework, agent_name: str, persona: str, tone: str) -> str:
     rules = "\n".join(f"- {r}" for r in framework.rules) or "(none)"
     win = "\n".join(f"- {w}" for w in framework.win_conditions) or "(none)"
     lose = "\n".join(f"- {l}" for l in framework.lose_conditions) or "(none)"
-    desc = agent.description or "(no personality given)"
-    return f"""You are {agent.name}, an agent playing a game called "{framework.name}".
+    tone_block = f"\nGAME TONE: {tone}\n" if tone else ""
+    return f"""You are {agent_name}, an agent playing a game called "{framework.name}".
 
 {framework.description}
 
-YOUR PERSONA: {desc}
-
+YOUR PERSONA: {persona}
+{tone_block}
 OBJECTIVE: {framework.objective}
 
 RULES:
@@ -93,12 +93,13 @@ def format_transcript(messages: list[dict[str, Any]], limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-def run_agent(provider: ChatProvider, agent: AgentSpec, engine) -> dict[str, Any]:
+def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str, Any]:
     framework = engine.framework
     action_names = {a.name for a in framework.actions}
 
+    persona = cfg.resolve_persona(agent)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(framework, agent)}
+        {"role": "system", "content": build_system_prompt(framework, agent.name, persona, cfg.tone)}
     ]
     inbox = engine.unread_messages(agent.name)
     user = (
