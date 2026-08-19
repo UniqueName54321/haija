@@ -1,20 +1,25 @@
-"""Haija's graphical interface — full feature parity with the CLI.
+"""Haija's graphical interface — a zero-dependency browser app.
 
-Every CLI action is available here (new / open / generate / validate / run /
-export / options), plus a cleaner toolbar + sidebar layout. Stdlib-only
-(``tkinter``). Launched via ``haija gui``.
+``haija gui`` starts a local HTTP server (stdlib ``http.server``) and opens your
+browser. The UI has full feature parity with the CLI: open/new a project,
+generate a framework from a prompt, validate, run (with live streaming), tweak
+options (tone / archetypes / model), and export the run as a ``.txt``.
+
+No Tkinter, no platform-specific quirks — just Python + a browser.
 """
 
 from __future__ import annotations
 
 import json
-import queue
+import os
 import threading
+import webbrowser
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import tkinter as tk
-from tkinter import Tk, filedialog, messagebox, ttk
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
-from .archetypes import Archetype
 from .config import ProjectConfig
 from .engine import Engine, run_game
 from .framework import load_framework
@@ -22,582 +27,361 @@ from .generate import generate_framework
 from .project import new_project
 from .provider import ChatProvider, ProviderError
 
+DEFAULT_PORT = 8657
 
-def format_event(ev: dict) -> str:
-    t = ev.get("type")
-    if t == "game_start":
-        out = f"=== {ev['name']} ===\n"
-        if ev.get("description"):
-            out += ev["description"] + "\n"
-        out += (
-            f"Objective: {ev.get('objective') or '(none)'} · "
-            f"Agents: {', '.join(ev.get('agents', []))}\n"
-            f"Order: {ev.get('order')} · max_turns: {ev.get('max_turns')}"
-        )
-        return out
-    if t == "turn_start":
-        return f"\n--- Turn {ev['turn']} — {ev['agent']} ---"
-    if t == "assistant":
-        return f"[{ev['agent']} says] {ev['content']}"
-    if t == "reasoning":
-        return f"[{ev['agent']} thinks] {ev['reasoning']}"
-    if t == "tool":
-        return f"[{ev['agent']} → {ev['name']}({json.dumps(ev.get('arguments') or {})})]"
-    if t == "message":
-        return f"[{ev['from']} → {ev['to']}] {ev['text']}"
-    if t == "log":
-        return f"[{ev['from']} logs] {ev['text']}"
-    if t == "outcome":
+
+@dataclass
+class HaijaState:
+    project_dir: Path = field(default_factory=lambda: Path("."))
+    cfg: ProjectConfig | None = None
+    fw: Any = None
+    toml_path: Path | None = None
+    engine: Engine | None = None
+    export_path: Path | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    busy: bool = False
+    worker_thread: threading.Thread | None = None
+
+    def add_event(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+
+
+def _read_index_html() -> str:
+    try:
+        from importlib import resources
+
+        return resources.files("haija").joinpath("static", "index.html").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
         return (
-            f"[{ev['from']} declares] {ev['outcome']} "
-            f"(winner {ev.get('winner') or '?'}): {ev.get('reason', '')}"
-        )
-    if t == "game_over":
-        out = "\n=== GAME OVER ==="
-        if ev.get("outcome"):
-            out += f"\nOutcome: {ev['outcome']} (winner {ev.get('winner') or '?'})"
-        else:
-            out += "\nTurn limit reached — no outcome declared."
-        out += "\nFinal state:\n" + json.dumps(ev.get("final_state", {}), indent=2)
-        return out
-    return json.dumps(ev)
-
-
-class NewProjectDialog(tk.Toplevel):
-    def __init__(self, parent) -> None:
-        super().__init__(parent)
-        self.result: tuple[str, str] | None = None
-        self.title("New project")
-        self.transient(parent)
-        self.grab_set()
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Name:").grid(row=0, column=0, sticky="w")
-        self.name_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.name_var, width=30).grid(row=0, column=1, pady=3, sticky="we")
-        ttk.Label(frm, text="Directory:").grid(row=1, column=0, sticky="w")
-        self.dir_var = tk.StringVar(value=".")
-        ttk.Entry(frm, textvariable=self.dir_var, width=30).grid(row=1, column=1, pady=3, sticky="we")
-        ttk.Button(frm, text="Browse…", command=self._browse).grid(row=1, column=2, padx=4)
-        btns = ttk.Frame(frm)
-        btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=8)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=6)
-
-    def _browse(self) -> None:
-        d = filedialog.askdirectory()
-        if d:
-            self.dir_var.set(d)
-
-    def _ok(self) -> None:
-        name = self.name_var.get().strip()
-        if not name:
-            messagebox.showerror("Missing name", "Give the project a name.", parent=self)
-            return
-        self.result = (name, self.dir_var.get().strip() or ".")
-        self.destroy()
-
-
-class PromptDialog(tk.Toplevel):
-    def __init__(self, parent, title: str, label: str) -> None:
-        super().__init__(parent)
-        self.result: str | None = None
-        self.title(title)
-        self.transient(parent)
-        self.grab_set()
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text=label).pack(anchor="w")
-        self.text = tk.Text(frm, height=6, width=60, wrap="word")
-        self.text.pack(fill="both", expand=True, pady=6)
-        btns = ttk.Frame(frm)
-        btns.pack(anchor="e")
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=6)
-
-    def _ok(self) -> None:
-        self.result = self.text.get("1.0", "end").strip()
-        self.destroy()
-
-
-class NewArchetypeDialog(tk.Toplevel):
-    def __init__(self, parent, on_add) -> None:
-        super().__init__(parent)
-        self.on_add = on_add
-        self.title("New archetype")
-        self.transient(parent)
-        self.grab_set()
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="id (short, no spaces):").grid(row=0, column=0, sticky="w")
-        self.id_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.id_var, width=40).grid(row=0, column=1, pady=3)
-        ttk.Label(frm, text="Name:").grid(row=1, column=0, sticky="w")
-        self.name_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.name_var, width=40).grid(row=1, column=1, pady=3)
-        ttk.Label(frm, text="Persona:").grid(row=2, column=0, sticky="nw")
-        self.persona_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.persona_var, width=40).grid(row=2, column=1, pady=3)
-        btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=8)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(btns, text="Add", command=self._add).pack(side="right", padx=6)
-
-    def _add(self) -> None:
-        arch_id = self.id_var.get().strip().lower().replace(" ", "-")
-        name = self.name_var.get().strip() or arch_id
-        persona = self.persona_var.get().strip()
-        if not arch_id:
-            messagebox.showerror("Missing id", "Give the archetype an id.", parent=self)
-            return
-        self.on_add(arch_id, name, persona)
-        self.destroy()
-
-
-class OptionsDialog(tk.Toplevel):
-    def __init__(self, parent, cfg: ProjectConfig, toml_path: Path, on_saved=None) -> None:
-        super().__init__(parent)
-        self.cfg = cfg
-        self.toml_path = toml_path
-        self.on_saved = on_saved
-        self.title(f"Game options — {cfg.name}")
-        self.transient(parent)
-        self.grab_set()
-        self.geometry("700x500")
-        self.check_vars: dict[str, tk.BooleanVar] = {}
-        self._build()
-
-    def _build(self) -> None:
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
-        agents_tab = ttk.Frame(nb, padding=10)
-        model_tab = ttk.Frame(nb, padding=10)
-        nb.add(agents_tab, text="Agents & tone")
-        nb.add(model_tab, text="Model")
-        self._build_agents_tab(agents_tab)
-        self._build_model_tab(model_tab)
-
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(btns, text="Save", command=self._save).pack(side="right", padx=6)
-
-    def _build_agents_tab(self, frm: ttk.Frame) -> None:
-        ttk.Label(frm, text="Game tone (applied to all agents):").grid(row=0, column=0, sticky="w")
-        self.tone_var = tk.StringVar(value=self.cfg.tone)
-        ttk.Entry(frm, textvariable=self.tone_var).grid(row=0, column=1, sticky="we", padx=6, pady=4)
-        frm.columnconfigure(1, weight=1)
-
-        ttk.Label(frm, text="Archetypes (check = add as an agent):").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(14, 2)
-        )
-        listwrap = ttk.Frame(frm)
-        listwrap.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        frm.rowconfigure(2, weight=1)
-        canvas = tk.Canvas(listwrap, height=240, borderwidth=0, highlightthickness=0)
-        scroll = ttk.Scrollbar(listwrap, orient="vertical", command=canvas.yview)
-        self.inner = ttk.Frame(canvas)
-        self.inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        self._populate_list()
-
-        ttk.Button(frm, text="New archetype…", command=self._new_archetype).grid(
-            row=3, column=0, sticky="w", pady=8
+            "<!doctype html><html><body style='font-family:sans-serif;background:#0f1220;"
+            "color:#dbe0ee;padding:2rem'><h1>Haija</h1><p>The UI failed to load.</p>"
+            "<p>Make sure the <code>haija/static/index.html</code> file is present.</p></body></html>"
         )
 
-    def _build_model_tab(self, frm: ttk.Frame) -> None:
-        fields = [
-            ("Provider", "provider_var", self.cfg.model.provider),
-            ("Model", "model_var", self.cfg.model.model),
-            ("Base URL", "base_url_var", self.cfg.model.base_url),
-            ("API key env var", "api_key_env_var", self.cfg.model.api_key_env),
-            ("API key (optional)", "api_key_var", self.cfg.model.api_key or ""),
-        ]
-        for i, (label, var_name, value) in enumerate(fields):
-            ttk.Label(frm, text=label + ":").grid(row=i, column=0, sticky="w", pady=4)
-            var = tk.StringVar(value=value or "")
-            setattr(self, var_name, var)
-            ttk.Entry(frm, textvariable=var, width=46).grid(row=i, column=1, sticky="we", padx=6, pady=4)
-        frm.columnconfigure(1, weight=1)
-        ttk.Label(
-            frm,
-            text="The API key is read from the env var by default; hardcode it only if you must.",
-            wraplength=420,
-            foreground="#666",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=8)
 
-    def _populate_list(self) -> None:
-        for w in self.inner.winfo_children():
-            w.destroy()
-        self.check_vars = {}
-        row = 0
-        for arch_id, arch in sorted(self.cfg.all_archetypes().items()):
-            var = tk.BooleanVar(value=self.cfg.agent_for_archetype(arch_id) is not None)
-            self.check_vars[arch_id] = var
-            ttk.Checkbutton(
-                self.inner,
-                text=f"{arch.name} — {arch.persona}",
-                variable=var,
-                wraplength=520,
-                justify="left",
-            ).grid(row=row, column=0, sticky="w", pady=1)
-            if arch_id in self.cfg.archetypes:  # custom → deletable
-                ttk.Button(
-                    self.inner, text="X", width=3, command=lambda a=arch_id: self._delete_archetype(a)
-                ).grid(row=row, column=1, padx=4)
-            row += 1
-
-    def _new_archetype(self) -> None:
-        NewArchetypeDialog(self, self._add_archetype)
-
-    def _add_archetype(self, arch_id: str, name: str, persona: str) -> None:
-        self.cfg.add_archetype(arch_id, name, persona)
-        self.cfg.enable_archetype(arch_id)
-        self._populate_list()
-
-    def _delete_archetype(self, arch_id: str) -> None:
-        self.cfg.remove_archetype(arch_id)
-        self._populate_list()
-
-    def _save(self) -> None:
-        self.cfg.tone = self.tone_var.get().strip()
-        for arch_id, var in self.check_vars.items():
-            self.cfg.set_archetype_enabled(arch_id, var.get())
-        self.cfg.model.provider = self.provider_var.get().strip() or "openrouter"
-        self.cfg.model.model = self.model_var.get().strip() or self.cfg.model.model
-        self.cfg.model.base_url = self.base_url_var.get().strip() or self.cfg.model.base_url
-        self.cfg.model.api_key_env = self.api_key_env_var.get().strip() or self.cfg.model.api_key_env
-        self.cfg.model.api_key = self.api_key_var.get().strip() or None
-        self.cfg.save(self.toml_path)
-        self.destroy()
-        if self.on_saved:
-            self.on_saved()
+def _run_thread(state: HaijaState) -> None:
+    try:
+        provider = ChatProvider(state.cfg.model)
+        engine = Engine(
+            state.fw,
+            [a.name for a in state.cfg.agents],
+            max_steps_per_turn=state.cfg.max_steps_per_turn,
+        )
+        state.engine = engine
+        persist_msg = run_game(engine, provider, state.cfg, observer=state.add_event)
+        state.add_event({"type": "info", "message": persist_msg})
+    except ProviderError as e:
+        state.add_event({"type": "error", "message": str(e)})
+    except Exception as e:  # noqa: BLE001
+        state.add_event({"type": "error", "message": str(e)})
+    finally:
+        state.add_event({"type": "done"})
+        state.busy = False
 
 
-class HaijaApp:
-    def __init__(self, root: Tk) -> None:
-        self.root = root
-        root.title("Haija — AI game engine")
-        root.geometry("1000x680")
-        self.q: "queue.Queue[dict]" = queue.Queue()
-        self.cfg: ProjectConfig | None = None
-        self.fw = None
-        self.engine: Engine | None = None
-        self.worker: threading.Thread | None = None
-        self.toml_path: Path | None = None
-        self.project_dir: Path = Path(".")
-        self.busy = False
-        self._pending_export = False
-        self._build()
-        root.after(100, self._poll)
+def _generate_thread(state: HaijaState, prompt: str) -> None:
+    try:
+        provider = ChatProvider(state.cfg.model)
+        fw = generate_framework(provider, prompt)
+        out = state.toml_path.parent / state.cfg.framework_path
+        out.write_text(json.dumps(fw.to_dict(), indent=2) + "\n", encoding="utf-8")
+        state.fw = fw
+        state.add_event({"type": "info", "message": f"Wrote framework '{fw.name}' → {out}"})
+    except Exception as e:  # noqa: BLE001
+        state.add_event({"type": "error", "message": str(e)})
+    finally:
+        state.add_event({"type": "done"})
+        state.busy = False
 
-    # ---- layout -----------------------------------------------------------
-    def _build(self) -> None:
-        self._build_menu()
-        self._build_toolbar()
 
-        status = ttk.Frame(self.root)
-        status.pack(side="bottom", fill="x")
-        self.status = tk.StringVar(value="Ready — open a project to begin")
-        ttk.Label(status, textvariable=self.status, padding=4, relief="sunken").pack(fill="x")
+class HaijaHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
-        content = ttk.Frame(self.root, padding=8)
-        content.pack(side="top", fill="both", expand=True)
-        self._build_sidebar(content)
-        self._build_log(content)
+    def __init__(self, addr, handler):
+        super().__init__(addr, handler)
+        self.state = HaijaState()
 
-    def _build_menu(self) -> None:
-        menubar = tk.Menu(self.root)
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="New Project…", command=self._new_project)
-        file_menu.add_command(label="Open Project…", command=self._open_project)
-        file_menu.add_separator()
-        file_menu.add_command(label="Export Run…", command=self._export)
-        file_menu.add_separator()
-        file_menu.add_command(label="Quit", command=self.root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
 
-        game_menu = tk.Menu(menubar, tearoff=0)
-        game_menu.add_command(label="Generate Framework…", command=self._generate)
-        game_menu.add_command(label="Validate", command=self._validate)
-        game_menu.add_separator()
-        game_menu.add_command(label="Run", command=self._run)
-        menubar.add_cascade(label="Game", menu=game_menu)
+class Handler(BaseHTTPRequestHandler):
+    server: HaijaHTTPServer
 
-        opts_menu = tk.Menu(menubar, tearoff=0)
-        opts_menu.add_command(label="Archetypes & tone…", command=self.open_options)
-        menubar.add_cascade(label="Options", menu=opts_menu)
-        self.root.config(menu=menubar)
+    def log_message(self, *args) -> None:  # silence request logging
+        pass
 
-    def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self.root, padding=(8, 4))
-        bar.pack(side="top", fill="x")
-        self.new_btn = ttk.Button(bar, text="New", command=self._new_project)
-        self.open_btn = ttk.Button(bar, text="Open", command=self._open_project)
-        self.gen_btn = ttk.Button(bar, text="Generate", command=self._generate)
-        self.val_btn = ttk.Button(bar, text="Validate", command=self._validate)
-        self.run_btn = ttk.Button(bar, text="Run", command=self._run)
-        self.export_btn = ttk.Button(bar, text="Export", command=self._export, state="disabled")
-        for i, b in enumerate(
-            (self.new_btn, self.open_btn, self.gen_btn, self.val_btn, self.run_btn, self.export_btn)
-        ):
-            b.pack(side="left", padx=2)
-
-    def _build_sidebar(self, parent: ttk.Frame) -> None:
-        side = ttk.Frame(parent, padding=(0, 0, 8, 0))
-        side.pack(side="left", fill="y")
-        ttk.Label(side, text="PROJECT", font=("", 9, "bold")).pack(anchor="w")
-        self.proj_name = ttk.Label(side, text="(none)", wraplength=200)
-        self.proj_name.pack(anchor="w")
-        ttk.Label(side, text="Tone:").pack(anchor="w", pady=(10, 0))
-        self.tone_label = ttk.Label(side, text="(none)", wraplength=200)
-        self.tone_label.pack(anchor="w")
-        ttk.Label(side, text="Model:").pack(anchor="w", pady=(10, 0))
-        self.model_label = ttk.Label(side, text="(none)", wraplength=200)
-        self.model_label.pack(anchor="w")
-        ttk.Label(side, text="Agents:").pack(anchor="w", pady=(10, 0))
-        listwrap = ttk.Frame(side)
-        listwrap.pack(anchor="w", fill="y", expand=True, pady=2)
-        self.agents_list = tk.Listbox(listwrap, height=12, width=26)
-        sb = ttk.Scrollbar(listwrap, orient="vertical", command=self.agents_list.yview)
-        self.agents_list.configure(yscrollcommand=sb.set)
-        self.agents_list.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-
-    def _build_log(self, parent: ttk.Frame) -> None:
-        main = ttk.Frame(parent)
-        main.pack(side="left", fill="both", expand=True)
-        self.log = tk.Text(main, wrap="word", state="disabled", font=("Consolas", 10))
-        sb = ttk.Scrollbar(main, command=self.log.yview)
-        self.log.configure(yscrollcommand=sb.set)
-        self.log.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+    @property
+    def state(self) -> HaijaState:
+        return self.server.state
 
     # ---- helpers ----------------------------------------------------------
-    def _append(self, line: str) -> None:
-        self.log.configure(state="normal")
-        self.log.insert("end", line + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+    def _send_json(self, obj: Any, status: int = 200) -> None:
+        data = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
-    def _clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-
-    def _set_busy(self, busy: bool) -> None:
-        self.busy = busy
-        state = "disabled" if busy else "normal"
-        for b in (self.new_btn, self.open_btn, self.gen_btn, self.val_btn, self.run_btn):
-            b.configure(state=state)
-
-    def _refresh_sidebar(self) -> None:
-        if not self.cfg:
-            self.proj_name.configure(text="(none)")
-            self.tone_label.configure(text="(none)")
-            self.model_label.configure(text="(none)")
-            self.agents_list.delete(0, "end")
-            return
-        self.proj_name.configure(text=f"{self.cfg.name}\n{self.project_dir}")
-        self.tone_label.configure(text=self.cfg.tone or "(none)")
-        self.model_label.configure(text=f"{self.cfg.model.provider}\n{self.cfg.model.model}")
-        self.agents_list.delete(0, "end")
-        for a in self.cfg.agents:
-            arch = a.archetype or "custom"
-            self.agents_list.insert("end", f"{a.name} ({arch})")
-
-    def _load(self) -> Path:
-        toml = self.project_dir / "haija.toml"
-        if not toml.exists():
-            raise FileNotFoundError(f"no haija.toml found at {self.project_dir}")
-        self.cfg = ProjectConfig.load(toml)
-        self.toml_path = toml
-        self.fw = load_framework(toml.parent / self.cfg.framework_path)
-        self._refresh_sidebar()
-        return toml.parent
-
-    def _ensure_loaded(self) -> bool:
-        if self.cfg:
-            return True
+    def _read_body(self) -> dict[str, Any]:
         try:
-            self._load()
-            return True
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Load error", str(e))
-            return False
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if not length:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
 
-    # ---- actions ----------------------------------------------------------
-    def _new_project(self) -> None:
-        d = NewProjectDialog(self.root)
-        self.root.wait_window(d)
-        if not d.result:
+    def _query(self, name: str, default: str = "") -> str:
+        qs = parse_qs(urlparse(self.path).query)
+        return qs.get(name, [default])[0]
+
+    # ---- GET --------------------------------------------------------------
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            self._serve_html()
+        elif path == "/api/status":
+            self._api_status()
+        elif path == "/api/events":
+            self._api_events()
+        elif path == "/api/download":
+            self._api_download()
+        else:
+            self.send_error(404)
+
+    def _serve_html(self) -> None:
+        data = _read_index_html().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _api_status(self) -> None:
+        s = self.state
+        if not s.cfg:
+            self._send_json({"project": None, "agents": [], "archetypes": [], "busy": s.busy})
             return
-        name, directory = d.result
+        archetypes = [
+            {
+                "id": a.id,
+                "name": a.name,
+                "persona": a.persona,
+                "enabled": s.cfg.agent_for_archetype(a.id) is not None,
+                "custom": a.id in s.cfg.archetypes,
+            }
+            for a in sorted(s.cfg.all_archetypes().values(), key=lambda x: x.id)
+        ]
+        self._send_json(
+            {
+                "project": s.cfg.name,
+                "dir": str(s.project_dir),
+                "tone": s.cfg.tone,
+                "model_provider": s.cfg.model.provider,
+                "model_model": s.cfg.model.model,
+                "model_base_url": s.cfg.model.base_url,
+                "model_api_key_env": s.cfg.model.api_key_env,
+                "agents": [
+                    {"name": a.name, "archetype": a.archetype, "description": a.description}
+                    for a in s.cfg.agents
+                ],
+                "archetypes": archetypes,
+                "busy": s.busy,
+            }
+        )
+
+    def _api_events(self) -> None:
+        try:
+            since = int(self._query("since", "0"))
+        except ValueError:
+            since = 0
+        events = self.state.events[since:]
+        self._send_json({"events": events, "next": len(self.state.events)})
+
+    def _api_download(self) -> None:
+        p = self.state.export_path
+        if not p or not p.exists():
+            self.send_error(404)
+            return
+        data = p.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    # ---- POST -------------------------------------------------------------
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        body = self._read_body()
+        routes = {
+            "/api/open": self._api_open,
+            "/api/new": self._api_new,
+            "/api/generate": self._api_generate,
+            "/api/validate": self._api_validate,
+            "/api/run": self._api_run,
+            "/api/export": self._api_export,
+            "/api/options": self._api_options,
+        }
+        handler = routes.get(path)
+        if handler:
+            handler(body)
+        else:
+            self.send_error(404)
+
+    def _api_open(self, body: dict) -> None:
+        raw = (body.get("path") or "").strip() or "."
+        d = Path(raw)
+        toml = d / "haija.toml" if d.is_dir() else d
+        if not toml.exists():
+            self._send_json({"ok": False, "message": f"no haija.toml found at {raw}"})
+            return
+        try:
+            cfg = ProjectConfig.load(toml)
+            fw = load_framework(toml.parent / cfg.framework_path)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"ok": False, "message": str(e)})
+            return
+        s = self.state
+        s.cfg, s.toml_path, s.fw, s.project_dir = cfg, toml, fw, toml.parent
+        self._send_json({"ok": True, "message": f"Loaded project '{cfg.name}'", "project": cfg.name})
+
+    def _api_new(self, body: dict) -> None:
+        name = (body.get("name") or "").strip()
+        directory = (body.get("dir") or "").strip() or "."
+        if not name:
+            self._send_json({"ok": False, "message": "project name is required"})
+            return
         try:
             root = new_project(name, Path(directory))
-            self.project_dir = root
-            self._load()
-            self._clear_log()
-            self._append(f"[new] created project '{name}' at {root}")
-            self.status.set(f"Created {name}")
         except FileExistsError:
-            messagebox.showerror("New project", f"'{name}' already exists.")
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("New project", str(e))
-
-    def _open_project(self) -> None:
-        d = filedialog.askdirectory()
-        if not d:
+            self._send_json({"ok": False, "message": f"'{name}' already exists"})
             return
-        self.project_dir = Path(d)
-        try:
-            self._load()
-            self._clear_log()
-            self._append(f"[open] loaded project '{self.cfg.name}'")
-            self.status.set(f"Loaded {self.cfg.name}")
         except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Open project", str(e))
+            self._send_json({"ok": False, "message": str(e)})
+            return
+        cfg = ProjectConfig.load(root / "haija.toml")
+        fw = load_framework(root / cfg.framework_path)
+        s = self.state
+        s.cfg, s.toml_path, s.fw, s.project_dir = cfg, root / "haija.toml", fw, root
+        self._send_json({"ok": True, "message": f"Created project '{name}' at {root}", "project": name})
 
-    def _validate(self) -> None:
-        if not self._ensure_loaded():
+    def _api_generate(self, body: dict) -> None:
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            self._send_json({"ok": False, "message": "prompt is required"})
+            return
+        s = self.state
+        if not s.cfg:
+            self._send_json({"ok": False, "message": "open a project first"})
+            return
+        if s.busy:
+            self._send_json({"ok": False, "message": "a task is already running"})
+            return
+        s.busy = True
+        s.events.clear()
+        s.worker_thread = threading.Thread(target=_generate_thread, args=(s, prompt), daemon=True)
+        s.worker_thread.start()
+        self._send_json({"ok": True, "message": "generating…"})
+
+    def _api_validate(self, body: dict) -> None:
+        s = self.state
+        if not s.cfg:
+            self._send_json({"ok": False, "message": "open a project first"})
             return
         try:
-            self.fw = load_framework(self.toml_path.parent / self.cfg.framework_path)
-            self._append(
-                f"[validate] OK — framework '{self.fw.name}' "
-                f"({len(self.fw.actions)} actions, {len(self.cfg.agents)} agents)"
+            s.fw = load_framework(s.toml_path.parent / s.cfg.framework_path)
+            self._send_json(
+                {
+                    "ok": True,
+                    "message": f"OK — framework '{s.fw.name}' "
+                    f"({len(s.fw.actions)} actions, {len(s.cfg.agents)} agents)",
+                }
             )
-            messagebox.showinfo(
-                "Validate",
-                f"OK — framework '{self.fw.name}'\n"
-                f"{len(self.fw.actions)} action(s), {len(self.cfg.agents)} agent(s)",
-            )
         except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Validate", str(e))
+            self._send_json({"ok": False, "message": str(e)})
 
-    def _generate(self) -> None:
-        if not self._ensure_loaded():
+    def _api_run(self, body: dict) -> None:
+        s = self.state
+        if not s.cfg:
+            self._send_json({"ok": False, "message": "open a project first"})
             return
-        d = PromptDialog(self.root, "Generate framework", "Describe your game:")
-        self.root.wait_window(d)
-        if not d.result:
+        if s.busy:
+            self._send_json({"ok": False, "message": "a task is already running"})
             return
-        prompt = d.result
-        self._set_busy(True)
-        self._pending_export = False
-        self.status.set("Generating framework…")
-        self._append(f"[generate] prompt: {prompt}")
+        s.busy = True
+        s.events.clear()
+        s.worker_thread = threading.Thread(target=_run_thread, args=(s,), daemon=True)
+        s.worker_thread.start()
+        self._send_json({"ok": True, "message": "running…"})
 
-        def work() -> None:
-            try:
-                provider = ChatProvider(self.cfg.model)
-                fw = generate_framework(provider, prompt)
-                out = self.toml_path.parent / self.cfg.framework_path
-                out.write_text(json.dumps(fw.to_dict(), indent=2) + "\n", encoding="utf-8")
-                self.fw = fw
-                self.q.put({"type": "info", "message": f"Wrote framework '{fw.name}' → {out}"})
-            except Exception as e:  # noqa: BLE001
-                self.q.put({"type": "error", "message": str(e)})
-            finally:
-                self.q.put({"type": "done"})
-
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
-
-    def _run(self) -> None:
-        if self.busy:
+    def _api_export(self, body: dict) -> None:
+        s = self.state
+        if not s.engine:
+            self._send_json({"ok": False, "message": "nothing to export — run a game first"})
             return
-        if not self._ensure_loaded():
-            return
-        self._clear_log()
-        self._set_busy(True)
-        self._pending_export = True
-        self.export_btn.configure(state="disabled")
-        self.status.set("Running…")
-
-        def observer(event: dict) -> None:
-            self.q.put(event)
-
-        self.worker = threading.Thread(
-            target=self._run_thread, args=(self.toml_path.parent, observer), daemon=True
-        )
-        self.worker.start()
-
-    def _run_thread(self, base: Path, observer) -> None:
-        try:
-            provider = ChatProvider(self.cfg.model)
-            engine = Engine(
-                self.fw,
-                [a.name for a in self.cfg.agents],
-                max_steps_per_turn=self.cfg.max_steps_per_turn,
-            )
-            self.engine = engine
-            persist_msg = run_game(engine, provider, self.cfg, observer=observer)
-            self.q.put({"type": "info", "message": persist_msg})
-        except ProviderError as e:
-            self.q.put({"type": "error", "message": str(e)})
-        except Exception as e:  # noqa: BLE001
-            self.q.put({"type": "error", "message": str(e)})
-        finally:
-            self.q.put({"type": "done"})
-
-    # ---- options ----------------------------------------------------------
-    def open_options(self) -> None:
-        if not self._ensure_loaded():
-            return
-        OptionsDialog(self.root, self.cfg, self.toml_path, on_saved=self._on_options_saved)
-
-    def _on_options_saved(self) -> None:
-        self._refresh_sidebar()
-        self.status.set(f"Options saved → {self.toml_path}")
-        self._append(f"[options] saved → {self.toml_path}")
-
-    # ---- export -----------------------------------------------------------
-    def _export(self) -> None:
-        if not self.engine:
-            messagebox.showinfo("Nothing to export", "Run a game first.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".txt", initialfile="haija-export.txt")
-        if not path:
-            return
-        Path(path).write_text(self.engine.export_text(), encoding="utf-8")
-        self.status.set(f"Exported → {path}")
-
-    # ---- event loop -------------------------------------------------------
-    def _poll(self) -> None:
-        try:
-            while True:
-                self._handle(self.q.get_nowait())
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll)
-
-    def _handle(self, ev: dict) -> None:
-        t = ev.get("type")
-        if t == "error":
-            self._append(f"[error] {ev['message']}")
-            self.status.set("Error")
-            self._set_busy(False)
-        elif t == "done":
-            self._set_busy(False)
-            if self._pending_export:
-                self.export_btn.configure(state="normal")
-                self.status.set("Finished — click Export to save the run")
-            else:
-                self.status.set("Done")
-        elif t == "info":
-            self.status.set(ev["message"])
+        if body.get("path"):
+            out = Path(body["path"])
         else:
-            self._append(format_event(ev))
+            out = s.project_dir / "haija-export.txt"
+        try:
+            out.write_text(s.engine.export_text(), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"ok": False, "message": str(e)})
+            return
+        s.export_path = out
+        self._send_json(
+            {"ok": True, "message": f"Exported → {out}", "path": str(out), "download": "/api/download"}
+        )
+
+    def _api_options(self, body: dict) -> None:
+        s = self.state
+        if not s.cfg:
+            self._send_json({"ok": False, "message": "open a project first"})
+            return
+        cfg = s.cfg
+        if "tone" in body and body["tone"] is not None:
+            cfg.tone = (body["tone"] or "").strip()
+        if body.get("model"):
+            cfg.model.model = body["model"].strip()
+        if body.get("base_url"):
+            cfg.model.base_url = body["base_url"].strip()
+        if body.get("api_key_env"):
+            cfg.model.api_key_env = body["api_key_env"].strip()
+        if body.get("enabled_archetypes") is not None:
+            enabled = set(body["enabled_archetypes"])
+            for arch_id in list(cfg.all_archetypes()):
+                cfg.set_archetype_enabled(arch_id, arch_id in enabled)
+        try:
+            cfg.save(s.toml_path)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"ok": False, "message": str(e)})
+            return
+        self._send_json({"ok": True, "message": f"Options saved → {s.toml_path}"})
 
 
 def main() -> int:
-    root = Tk()
-    HaijaApp(root)
-    root.mainloop()
+    host = "127.0.0.1"
+    port = int(os.environ.get("HAIJA_PORT", DEFAULT_PORT))
+    server = HaijaHTTPServer((host, port), Handler)
+    url = f"http://{host}:{port}/"
+    print(f"Haija GUI running at {url}")
+    print("Press Ctrl+C to stop.")
+    try:
+        webbrowser.open(url)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 

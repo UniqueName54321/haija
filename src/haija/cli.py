@@ -114,13 +114,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_gui(args: argparse.Namespace) -> int:
     try:
         from .gui import main as gui_main
-    except ImportError as e:
+    except Exception as e:  # noqa: BLE001
         print(f"error: could not start the GUI: {e}", file=sys.stderr)
-        print(
-            "The GUI needs Tkinter (python3-tk on Debian/Ubuntu, or a Python "
-            "install that includes Tk on Windows/macOS).",
-            file=sys.stderr,
-        )
         return 1
     return gui_main()
 

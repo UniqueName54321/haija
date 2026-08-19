@@ -16,7 +16,7 @@ calls.
 - 🎚️ **Game tone** — one tone applied to every agent, set from the options menu.
 - 🔌 **OpenRouter by default** — any OpenAI-compatible endpoint works too.
 - 💬 **Agents talk to each other** — `send_message` lets agents coordinate, negotiate, and bluff mid-game, with a per-agent inbox.
-- 🖥️ **Basic GUI** — `haija gui` opens a Tkinter window to run and watch games live.
+- 🖥️ **Browser GUI** — `haija gui` starts a local server and opens a web UI in your browser (no Tkinter, full CLI parity).
 - 📄 **Export the whole run** — responses, tool calls, and chain-of-thought, saved as a human-readable `.txt`.
 
 ## How it works
@@ -215,12 +215,11 @@ responses, chain-of-thought, tool calls, and chat. Or open the GUI:
 haija gui
 ```
 
-The GUI (a Tkinter window — needs `python3-tk` on Linux, or a Python that ships
-Tk on Windows/macOS) has **full feature parity with the CLI**: create or open a
-project, generate a framework from a prompt, validate it, run and watch the game
-live, tweak options (archetypes, tone, and model) from the Options menu, and
-export everything with one click. A toolbar and a project sidebar keep it quick
-to use.
+The GUI is a **browser app** — `haija gui` starts a local server and opens your
+browser (no Tkinter, no extra dependencies). It has full feature parity with
+the CLI: create or open a project, generate a framework from a prompt, validate
+it, run and watch the game live, tweak options (archetypes, tone, and model),
+and export everything with one click.
 
 When a game finishes, Haija saves `run.json` (the full structured log), the
 final `state.json`, and a `transcript.json` into the project directory. Turn
@@ -240,7 +239,7 @@ results, chain-of-thought, chat messages, and the final state.
   of agent-declared outcomes, plus validation of action legality.
 - **Offline effect simulation** — resolve actions without an LLM in the loop.
 - **Hidden information & memory** — per-agent private state, alliances.
-- **Richer viewer / replay** — a web UI and turn-by-turn playback (the basic Tkinter GUI already ships).
+- **Richer viewer / replay** — turn-by-turn playback and replay of past runs.
 
 ## License
 
