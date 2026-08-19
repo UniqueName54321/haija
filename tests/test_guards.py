@@ -40,6 +40,15 @@ def test_guard_exists():
     assert not evaluate_guard({"op": "not_exists", "path": "hand"}, _ctx(s))[0]
 
 
+def test_guard_exists_supports_value_addressed_list_path():
+    state = {"hands": {"Alpha": ["Wild", "Y0"]}}
+    ctx = _ctx(state, params={"card": "Y0"})
+    guard = {"op": "exists", "path": "hands.{{actor}}.{{params.card}}"}
+    assert evaluate_guard(guard, ctx)[0]
+    ctx["params"]["card"] = "R9"
+    assert not evaluate_guard(guard, ctx)[0]
+
+
 def test_guard_not():
     s = {"board": [" ", "X"]}
     assert evaluate_guard({"not": {"op": "eq", "path": "board.0", "value": "X"}}, _ctx(s))[0]

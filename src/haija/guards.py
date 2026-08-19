@@ -38,7 +38,13 @@ def _navigate(state: Any, segs: list[str]) -> tuple[bool, Any]:
             try:
                 idx = int(seg)
             except (ValueError, TypeError):
-                return False, None
+                # Generated frameworks often express list membership as a
+                # value-addressed path, e.g. hands.Alice.Y0. Treat a
+                # non-numeric segment as the requested list item.
+                try:
+                    idx = cur.index(seg)
+                except ValueError:
+                    return False, None
             if idx < 0 or idx >= len(cur):
                 return False, None
             cur = cur[idx]

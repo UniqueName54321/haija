@@ -31,6 +31,27 @@ def test_action_guard_rejects_illegal_move():
     assert e.state["board"][0] == "X"  # unchanged
 
 
+def test_value_addressed_card_can_be_guarded_and_removed_from_hand():
+    fw = {
+        "name": "UNO",
+        "initial_state": {"hands": {"Alpha": ["Wild", "Y0"]}, "discard_pile": []},
+        "actions": [{
+            "name": "play_card",
+            "parameters": {"type": "object", "properties": {"card": {"type": "string"}}},
+            "guard": [{"op": "exists", "path": "hands.{{actor}}.{{params.card}}"}],
+            "effects": [
+                {"op": "remove", "path": "hands.{{actor}}.{{params.card}}"},
+                {"op": "append", "path": "discard_pile", "value": "{{params.card}}"},
+            ],
+        }],
+    }
+    e = Engine(Framework.from_dict(fw), ["Alpha"])
+    result = e.apply_action(e.framework.actions[0], "Alpha", {"card": "Y0"})
+    assert result["ok"] is True
+    assert e.state["hands"]["Alpha"] == ["Wild"]
+    assert e.state["discard_pile"] == ["Y0"]
+
+
 def test_judge_declares_win():
     fw = {
         "name": "G",
@@ -133,6 +154,28 @@ def test_engine_resolves_card_game_setup_before_turn_one():
     assert len(e.state["discard_pile"]) == 1
     assert e.state["current_card"] == e.state["discard_pile"][-1]
     assert e.state["current_color"] == "red"
+
+
+def test_uno_string_cards_initialize_discard_color_and_number():
+    fw = {
+        "name": "UNO",
+        "description": "Each player starts with 2 cards.",
+        "initial_state": {
+            "phase": "setup",
+            "hands": {},
+            "deck": ["Wild", "RSkip", "Y0", "G8", "B2", "R4"],
+            "discard_pile": [],
+            "current_card": None,
+            "current_color": "",
+            "current_number": "",
+        },
+        "actions": [],
+    }
+    e = Engine(Framework.from_dict(fw), ["Alpha", "Beta"])
+    top = e.state["discard_pile"][-1]
+    assert top == e.state["current_card"]
+    assert e.state["current_color"] == top[0]
+    assert e.state["current_number"] == int(top[1:])
 
 
 def test_engine_stop_flag():

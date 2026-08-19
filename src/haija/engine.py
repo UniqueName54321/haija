@@ -91,7 +91,10 @@ class Engine:
             return
 
         hands = self.state.get("hands")
-        deck = self.state.get("deck")
+        deck = next(
+            (self.state[key] for key in ("deck", "draw_pile", "drawPile") if isinstance(self.state.get(key), list)),
+            None,
+        )
         if not isinstance(hands, dict) or not isinstance(deck, list):
             # A setup phase without declarative setup data must not trap agents
             # in an unwinnable polling loop.
@@ -104,27 +107,58 @@ class Engine:
         if deck and all(isinstance(hand, list) and not hand for hand in hands.values()):
             random.shuffle(deck)
             hand_size = self._starting_hand_size()
-            reserve = 1 if isinstance(self.state.get("discard_pile"), list) else 0
+            discard = self._discard_pile()
+            reserve = 1 if discard is not None else 0
             available = max(0, len(deck) - reserve)
             hand_size = min(hand_size, available // max(1, len(self.agents)))
             for _ in range(hand_size):
                 for agent in self.agents:
                     hands[agent].append(deck.pop())
 
-        discard = self.state.get("discard_pile")
-        if isinstance(discard, list) and not discard and deck:
-            card = deck.pop()
+        discard = self._discard_pile()
+        if discard is not None and not discard and deck:
+            card = self._pop_initial_discard(deck)
             discard.append(card)
             for key in ("top_card", "current_card"):
                 if key in self.state:
                     self.state[key] = copy.deepcopy(card)
-            color = card.get("color") if isinstance(card, dict) else None
+            color, value = self._card_attributes(card)
             if color is not None:
                 for key in ("current_color", "active_color"):
                     if key in self.state:
                         self.state[key] = color
+            if value is not None:
+                for key in ("current_number", "current_value"):
+                    if key in self.state:
+                        self.state[key] = value
 
         self.state["phase"] = "playing"
+
+    def _discard_pile(self) -> list[Any] | None:
+        for key in ("discard_pile", "discard", "played_cards", "discardPile"):
+            value = self.state.get(key)
+            if isinstance(value, list):
+                return value
+        return None
+
+    @staticmethod
+    def _card_attributes(card: Any) -> tuple[Any, Any]:
+        if isinstance(card, dict):
+            return card.get("color"), card.get("number", card.get("value"))
+        if isinstance(card, str) and len(card) >= 2 and card[0].upper() in "RGBY":
+            value = card[1:]
+            return card[0].upper(), int(value) if value.isdigit() else value
+        return None, None
+
+    @classmethod
+    def _pop_initial_discard(cls, deck: list[Any]) -> Any:
+        # Prefer a numbered/ordinary colored card so play starts with an
+        # unambiguous color and value instead of an unresolved Wild/action.
+        for index in range(len(deck) - 1, -1, -1):
+            color, value = cls._card_attributes(deck[index])
+            if color is not None and (isinstance(value, (int, float)) or str(value).isdigit()):
+                return deck.pop(index)
+        return deck.pop()
 
     def _starting_hand_size(self) -> int:
         for key in ("initial_hand_size", "starting_hand_size", "cards_per_player", "hand_size"):
@@ -278,14 +312,24 @@ class Engine:
     def _navigate(self, segs: list[str]) -> Any:
         cur: Any = self.state
         for seg in segs:
-            cur = cur[int(seg)] if isinstance(cur, list) else cur[seg]
+            if isinstance(cur, list):
+                try:
+                    key = int(seg)
+                except (TypeError, ValueError):
+                    key = cur.index(seg)
+                cur = cur[key]
+            else:
+                cur = cur[seg]
         return cur
 
     def _parent_key(self, segs: list[str]) -> tuple[Any, Any]:
         parent = self._navigate(segs[:-1])
         key: Any = segs[-1]
         if isinstance(parent, list):
-            key = int(key)
+            try:
+                key = int(key)
+            except (TypeError, ValueError):
+                key = parent.index(key)
         return parent, key
 
     # ---- tool dispatch ----------------------------------------------------
