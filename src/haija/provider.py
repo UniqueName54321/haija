@@ -244,3 +244,102 @@ class ChatProvider:
             with self._response_lock:
                 self._response = None
             resp.close()
+
+    def chat_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        reasoning: dict[str, Any] | None = None,
+        observer=None,
+    ) -> ChatResponse:
+        """Stream a complete tool-capable response while reporting text deltas."""
+        self._check_cancelled()
+        if not self.api_key:
+            raise ProviderError(
+                f"No API key found. Set the {self.config.api_key_env} environment variable "
+                "(or model.api_key in haija.toml)."
+            )
+        payload: dict[str, Any] = {
+            "model": self.config.model, "messages": messages, "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+        if reasoning:
+            payload["reasoning"] = reasoning
+        headers = self._headers()
+        headers["Accept-Encoding"] = "identity"
+        req = urllib.request.Request(
+            self._url(), data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+            with self._response_lock:
+                self._response = resp
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            raise ProviderError(f"API error {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise ProviderError(f"Network error: {e.reason}") from e
+
+        content = ""
+        thought = ""
+        calls: dict[int, dict[str, str]] = {}
+        try:
+            for line in resp:
+                self._check_cancelled()
+                line = line.decode("utf-8").strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data).get("choices", [{}])[0].get("delta", {})
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    continue
+                text_delta = delta.get("content") or ""
+                if isinstance(text_delta, list):
+                    text_delta = "".join(
+                        (part.get("text") or "") if isinstance(part, dict) else str(part)
+                        for part in text_delta
+                    )
+                if text_delta:
+                    content += text_delta
+                    if observer:
+                        observer({"kind": "content", "delta": text_delta, "full": content})
+                reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                if isinstance(reasoning_delta, list):
+                    reasoning_delta = "".join(
+                        (part.get("text") or "") if isinstance(part, dict) else str(part)
+                        for part in reasoning_delta
+                    )
+                if reasoning_delta:
+                    thought += reasoning_delta
+                    if observer:
+                        observer({"kind": "reasoning", "delta": reasoning_delta, "full": thought})
+                for tc in delta.get("tool_calls") or []:
+                    index = int(tc.get("index", 0))
+                    current = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        current["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    current["name"] += fn.get("name") or ""
+                    current["arguments"] += fn.get("arguments") or ""
+        except Exception as e:  # transport implementations differ when cancelled
+            if self._cancelled.is_set():
+                raise ProviderError("Stopped by user.") from e
+            raise
+        finally:
+            with self._response_lock:
+                self._response = None
+            resp.close()
+
+        tool_calls: list[ToolCall] = []
+        for index in sorted(calls):
+            raw = calls[index]
+            try:
+                arguments = json.loads(raw["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(ToolCall(raw["id"], raw["name"], arguments))
+        return ChatResponse(content=content, tool_calls=tool_calls, reasoning=thought)

@@ -47,6 +47,12 @@ break_alliance). Some actions may be rejected if they're illegal — the engine
 enforces the rules, so read any error and try a legal move instead. Play to
 win, be decisive, and call end_turn when done.
 
+Be socially active throughout the game. On most turns, react to the table with
+send_message before or after acting. Use public messages for banter and visible
+negotiation, and direct messages for private deals, warnings, coordination, or
+bluffs. Converse more than once when the situation changes, while still making
+a decisive game move and avoiding repetitive filler.
+
 For card games, `top_card` is the authoritative card currently in play;
 `discard_pile` is a summarized object, not an ordered public history. Use
 `next_actor` for the player targeted by a newly played Draw/Skip card and
@@ -116,17 +122,30 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
         f"Turn {engine.turn}.\n\nCurrent game state (authoritative):\n"
         f"{json.dumps(engine.public_state(agent.name), indent=2)}\n"
         f"{_format_inbox(inbox)}\n"
-        f"\nShared transcript:\n{format_transcript(engine.messages)}"
+        f"\nShared transcript:\n{format_transcript(engine.messages)}\n"
+        "\nSocial expectation: use send_message at least once this turn. Choose #table "
+        "or a direct message based on what would be most interesting or strategically useful."
     )
     messages.append({"role": "user", "content": user})
     tools = all_tools(framework)
     repeated_call: tuple[str, str] | None = None
     repeated_count = 0
+    sent_message = False
 
     for _ in range(engine.max_steps_per_turn):
         if engine.stopped:
             return {"content": "(stopped)"}
-        resp = provider.chat(messages, tools=tools, reasoning=reasoning_param(agent.thinking))
+        stream = getattr(provider, "chat_streaming", None)
+        if callable(stream):
+            def on_delta(event: dict[str, Any]) -> None:
+                event_type = "assistant_stream" if event["kind"] == "content" else "reasoning_stream"
+                engine.emit({"type": event_type, "agent": agent.name, **event})
+
+            resp = stream(
+                messages, tools=tools, reasoning=reasoning_param(agent.thinking), observer=on_delta
+            )
+        else:
+            resp = provider.chat(messages, tools=tools, reasoning=reasoning_param(agent.thinking))
 
         if engine.stopped:
             return {"content": "(stopped)"}
@@ -159,10 +178,16 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
         for tc in resp.tool_calls:
             if engine.stopped:
                 return {"content": "(stopped)"}
-            try:
-                result = engine.dispatch_tool(tc.name, tc.arguments, agent.name)
-            except Exception as e:  # noqa: BLE001
-                result = json.dumps({"error": str(e)})
+            chat_required = tc.name == "end_turn" and not sent_message
+            if chat_required:
+                result = json.dumps({"error": "Send a public or direct message before ending your turn."})
+            else:
+                try:
+                    result = engine.dispatch_tool(tc.name, tc.arguments, agent.name)
+                except Exception as e:  # noqa: BLE001
+                    result = json.dumps({"error": str(e)})
+            if tc.name == "send_message" and '"error"' not in result:
+                sent_message = True
             signature = (tc.name, json.dumps(tc.arguments, sort_keys=True))
             if signature == repeated_call:
                 repeated_count += 1
@@ -212,7 +237,7 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
                 engine.emit({"type": "info", "message": message})
                 engine.messages.append({"from": agent.name, "type": "turn_end", "text": message})
                 return {"content": "(stalled turn ended)"}
-            if tc.name == "end_turn":
+            if tc.name == "end_turn" and not chat_required:
                 return {"content": "(ended turn)"}
             if engine.outcome:
                 return {"outcome": engine.outcome, "winner": engine.winner}

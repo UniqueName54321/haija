@@ -94,22 +94,42 @@
   }
   .status { font-size: 13px; color: var(--muted); flex: 1; }
   .status.busy { color: var(--warn); }
-  #log {
+  .chat-workspace { flex: 1; min-height: 0; display: flex; background: #0b0d17; }
+  .channel-rail {
+    width: 190px; flex: 0 0 190px; padding: 12px 8px;
+    background: #121525; border-right: 1px solid var(--border); overflow-y: auto;
+  }
+  .channel-rail h3 { margin: 4px 9px 9px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  .channel-tab {
+    display: block; width: 100%; text-align: left; border: 0; background: transparent;
+    padding: 7px 9px; margin: 1px 0; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .channel-tab.active { color: white; background: #35305d; }
+  .channel-tab.unread::after { content: ' •'; color: var(--ok); }
+  #chat-panels { flex: 1; min-width: 0; position: relative; }
+  .chat-panel {
+    position: absolute; inset: 0;
     flex: 1;
     overflow-y: auto;
-    padding: 14px 16px;
-    font-family: var(--mono);
-    font-size: 12.5px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
+    padding: 18px 22px;
     background: #0b0d17;
   }
-  #log .dim { color: var(--muted); }
-  #log .agent { color: var(--accent-2); }
-  #log .tool { color: var(--warn); }
-  #log .chat { color: var(--ok); }
-  #log .outcome { color: var(--err); font-weight: 600; }
+  .chat-panel.hidden { display: none; }
+  .chat-message { display: grid; grid-template-columns: 34px 1fr; gap: 10px; margin: 0 0 14px; }
+  .chat-avatar { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; background: var(--accent); color: white; font-weight: 700; font-size: 12px; }
+  .chat-meta { font-size: 12px; margin-bottom: 3px; }
+  .chat-author { color: white; font-weight: 650; }
+  .chat-kind { color: var(--muted); margin-left: 7px; }
+  .chat-body { color: var(--text); line-height: 1.48; white-space: pre-wrap; word-break: break-word; }
+  .chat-message.thinking .chat-body { color: #aab1c8; font-style: italic; }
+  .chat-message.thinking .chat-avatar { background: #414861; }
+  .chat-message.tool .chat-body { color: var(--warn); font-family: var(--mono); font-size: 12px; }
+  .chat-message.system .chat-avatar { background: #30364d; }
+  .chat-message.system .chat-body { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .chat-message.outcome .chat-body { color: var(--err); font-weight: 600; }
+  .stream-cursor::after { content: '▋'; color: var(--accent-2); animation: blink .8s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
 
   /* Options overlay */
   .overlay {
@@ -224,9 +244,16 @@
   <section class="log">
     <div class="bar">
       <div class="status" id="status">Ready — open a project to begin.</div>
+      <strong id="channel-title"># table</strong>
       <button id="btn-clear" title="Clear log">Clear</button>
     </div>
-    <div id="log"></div>
+    <div class="chat-workspace">
+      <nav class="channel-rail">
+        <h3>Channels</h3>
+        <div id="channel-tabs"><button class="channel-tab active" data-channel="table"># table</button></div>
+      </nav>
+      <div id="chat-panels"><div id="log" class="chat-panel" data-channel="table"></div></div>
+    </div>
   </section>
 </main>
 
@@ -312,9 +339,11 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const logEl = $('log');
 let eventsSince = 0;
 let polling = false;
+let activeChannel = 'table';
+const channels = new Map([['table', $('log')]]);
+const streamMessages = new Map();
 
 async function api(path, method = 'GET', body = null) {
   const opts = { method };
@@ -326,14 +355,56 @@ async function api(path, method = 'GET', body = null) {
 function esc(s) {
   return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
-function logLine(text, cls) {
-  const div = document.createElement('div');
-  if (cls) div.className = cls;
-  div.textContent = text;
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
+function channelLabel(key) {
+  if (key === 'table') return '# table';
+  return '✉ ' + key.slice(3).split('|').join(' ↔ ');
 }
-function clearLog() { logEl.innerHTML = ''; }
+function ensureChannel(key) {
+  if (channels.has(key)) return channels.get(key);
+  const panel = document.createElement('div');
+  panel.className = 'chat-panel hidden'; panel.dataset.channel = key;
+  $('chat-panels').appendChild(panel); channels.set(key, panel);
+  const tab = document.createElement('button');
+  tab.className = 'channel-tab'; tab.dataset.channel = key; tab.textContent = channelLabel(key);
+  tab.onclick = () => switchChannel(key); $('channel-tabs').appendChild(tab);
+  return panel;
+}
+function switchChannel(key) {
+  activeChannel = key; ensureChannel(key);
+  channels.forEach((panel, name) => panel.classList.toggle('hidden', name !== key));
+  document.querySelectorAll('.channel-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.channel === key);
+    if (tab.dataset.channel === key) tab.classList.remove('unread');
+  });
+  $('channel-title').textContent = channelLabel(key);
+  const panel = channels.get(key); panel.scrollTop = panel.scrollHeight;
+}
+function dmChannel(a, b) { return 'dm:' + [a, b].sort().join('|'); }
+function addChatMessage({channel='table', author='Haija', kind='', text='', cls='', streaming=false}) {
+  const panel = ensureChannel(channel);
+  const row = document.createElement('div'); row.className = `chat-message ${cls}`;
+  const avatar = document.createElement('div'); avatar.className = 'chat-avatar';
+  avatar.textContent = String(author || '?').slice(0, 2).toUpperCase();
+  const content = document.createElement('div');
+  const meta = document.createElement('div'); meta.className = 'chat-meta';
+  const who = document.createElement('span'); who.className = 'chat-author'; who.textContent = author;
+  const role = document.createElement('span'); role.className = 'chat-kind'; role.textContent = kind;
+  const body = document.createElement('div'); body.className = 'chat-body';
+  if (streaming) body.classList.add('stream-cursor'); body.textContent = text;
+  meta.append(who, role); content.append(meta, body); row.append(avatar, content); panel.appendChild(row);
+  if (channel !== activeChannel) document.querySelector(`.channel-tab[data-channel="${CSS.escape(channel)}"]`)?.classList.add('unread');
+  panel.scrollTop = panel.scrollHeight;
+  return {row, body};
+}
+function logLine(text, cls) {
+  addChatMessage({author:'Haija', kind:'system', text, cls:`system ${cls || ''}`});
+}
+function clearLog() {
+  channels.forEach((panel, key) => { if (key !== 'table') panel.remove(); else panel.innerHTML = ''; });
+  channels.clear(); channels.set('table', $('log')); streamMessages.clear();
+  document.querySelectorAll('.channel-tab').forEach(tab => { if (tab.dataset.channel !== 'table') tab.remove(); });
+  switchChannel('table');
+}
 function setStatus(text, busy) {
   const s = $('status');
   s.textContent = text;
@@ -383,6 +454,58 @@ function eventClass(ev) {
   return '';
 }
 
+function renderChatEvent(ev) {
+  const t = ev.type;
+  if (t === 'assistant_stream' || t === 'reasoning_stream') {
+    const thought = t === 'reasoning_stream';
+    const key = `${ev.agent}:${thought ? 'thought' : 'speech'}`;
+    let item = streamMessages.get(key);
+    if (!item) {
+      item = addChatMessage({author:ev.agent, kind:thought ? 'thinking live' : 'speaking live', cls:thought ? 'thinking' : '', streaming:true});
+      streamMessages.set(key, item);
+    }
+    item.body.textContent = ev.full || '';
+    item.body.parentElement.parentElement.parentElement.scrollTop = item.body.parentElement.parentElement.parentElement.scrollHeight;
+    return true;
+  }
+  if (t === 'assistant' || t === 'reasoning') {
+    const thought = t === 'reasoning';
+    const key = `${ev.agent}:${thought ? 'thought' : 'speech'}`;
+    const item = streamMessages.get(key);
+    const text = thought ? ev.reasoning : ev.content;
+    if (item) {
+      item.body.textContent = text || ''; item.body.classList.remove('stream-cursor');
+      item.row.querySelector('.chat-kind').textContent = thought ? 'thinking' : 'says';
+      streamMessages.delete(key);
+    } else if (text) {
+      addChatMessage({author:ev.agent, kind:thought ? 'thinking' : 'says', text, cls:thought ? 'thinking' : ''});
+    }
+    return true;
+  }
+  if (t === 'message') {
+    const channel = ev.to === '*' ? 'table' : dmChannel(ev.from, ev.to);
+    addChatMessage({channel, author:ev.from, kind:ev.to === '*' ? 'to #table' : `DM to ${ev.to}`, text:ev.text});
+    return true;
+  }
+  if (t === 'tool') {
+    addChatMessage({author:ev.agent, kind:'used a tool', text:`${ev.name}(${JSON.stringify(ev.arguments || {})})`, cls:'tool'});
+    return true;
+  }
+  if (t === 'turn_start') {
+    addChatMessage({author:'Haija', kind:'turn', text:`Turn ${ev.turn} — ${ev.agent}`, cls:'system'});
+    return true;
+  }
+  if (t === 'game_start') {
+    addChatMessage({author:'Haija', kind:'game started', text:`${ev.name}\n${ev.description || ''}\nObjective: ${ev.objective || '(none)'}\nAgents: ${(ev.agents || []).join(', ')}`, cls:'system'});
+    return true;
+  }
+  if (t === 'outcome') {
+    addChatMessage({author:ev.from || 'Haija', kind:'outcome', text:`${ev.outcome} — winner ${ev.winner || '?'}\n${ev.reason || ''}`, cls:'outcome'});
+    return true;
+  }
+  return false;
+}
+
 async function loadStatus() {
   const s = await api('/api/status');
   if (s.project) {
@@ -412,8 +535,10 @@ function poll() {
   if (!polling) return;
   api(`/api/events?since=${eventsSince}`).then(data => {
     (data.events || []).forEach(ev => {
-      const text = formatEvent(ev);
-      if (text) logLine(text, eventClass(ev));
+      if (!renderChatEvent(ev)) {
+        const text = formatEvent(ev);
+        if (text) logLine(text, eventClass(ev));
+      }
       // Live streaming preview for framework generation
       if (ev.type === 'generate_stream' && ev.full) {
         let gs = $('gen-stream');
@@ -678,6 +803,7 @@ $('btn-stop').onclick = doStop;
 $('btn-export').onclick = doExport;
 $('btn-options').onclick = openOptions;
 $('btn-clear').onclick = clearLog;
+document.querySelector('.channel-tab[data-channel="table"]').onclick = () => switchChannel('table');
 $('opt-cancel').onclick = closeOptions;
 $('opt-save').onclick = saveOptions;
 $('opts-overlay').addEventListener('click', (e) => { if (e.target === $('opts-overlay')) closeOptions(); });

@@ -299,6 +299,37 @@ def test_provider_reports_clean_error_when_response_is_closed_by_stop(monkeypatc
         provider.chat([{"role": "user", "content": "go"}])
 
 
+def test_tool_capable_agent_stream_reconstructs_text_reasoning_and_calls(monkeypatch):
+    from haija.config import ModelConfig
+    from haija.provider import ChatProvider
+
+    chunks = [
+        {"choices": [{"delta": {"reasoning": "think "}}]},
+        {"choices": [{"delta": {"content": "hello "}}]},
+        {"choices": [{"delta": {"content": "world", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "send_", "arguments": "{\"to\":\"*\","}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "message", "arguments": "\"content\":\"hi\"}"}}]}}]},
+    ]
+
+    class Response:
+        def __iter__(self):
+            for chunk in chunks:
+                yield f"data: {json.dumps(chunk)}\n".encode()
+            yield b"data: [DONE]\n"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Response())
+    provider = ChatProvider(ModelConfig(api_key="test"))
+    streamed = []
+    response = provider.chat_streaming([{"role": "user", "content": "go"}], observer=streamed.append)
+    assert response.content == "hello world"
+    assert response.reasoning == "think "
+    assert response.tool_calls[0].name == "send_message"
+    assert response.tool_calls[0].arguments == {"to": "*", "content": "hi"}
+    assert [event["kind"] for event in streamed] == ["reasoning", "content", "content"]
+
+
 def _card_action():
     return {
         "name": "play_card",
