@@ -15,7 +15,8 @@ def new_project(name: str, dest: Path) -> Path:
     (root / "haija.toml").write_text(default_config(name), encoding="utf-8")
     (root / "framework.json").write_text(_empty_framework(name), encoding="utf-8")
     (root / ".gitignore").write_text(
-        "__pycache__/\n*.pyc\nstate.json\ntranscript.json\n.venv/\n", encoding="utf-8"
+        "__pycache__/\n*.pyc\nstate.json\ntranscript.json\nrun.json\nhaija-export.txt\n.venv/\n",
+        encoding="utf-8",
     )
     (root / "README.md").write_text(_project_readme(name), encoding="utf-8")
     return root

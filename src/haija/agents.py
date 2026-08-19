@@ -1,4 +1,9 @@
-"""Agent runner: builds prompts and drives the tool-calling loop."""
+"""Agent runner: builds prompts and drives the tool-calling loop.
+
+Every step is recorded to the engine's ``run_log`` (assistant text, reasoning,
+tool calls, tool results) and streamed to the engine's observer, so the whole
+game can be watched live and exported afterwards.
+"""
 
 from __future__ import annotations
 
@@ -34,7 +39,9 @@ LOSE CONDITIONS:
 
 The engine is the single source of truth for game state. You can only observe
 and change the world through your tools. Never claim a state you have not read
-via get_state. Play to win, be decisive, and call end_turn when done."""
+via get_state. You may send messages to other agents with send_message to
+coordinate, negotiate, or bluff. Play to win, be decisive, and call end_turn
+when done."""
 
 
 def _tool_calls_to_api(tool_calls: list[ToolCall]) -> list[dict[str, Any]] | None:
@@ -48,6 +55,17 @@ def _tool_calls_to_api(tool_calls: list[ToolCall]) -> list[dict[str, Any]] | Non
         }
         for tc in tool_calls
     ]
+
+
+def _format_inbox(inbox: list[dict[str, Any]]) -> str:
+    if not inbox:
+        return ""
+    lines = ["\nMessages for you since your last turn:"]
+    for m in inbox:
+        who = m.get("from", "?")
+        dest = "you" if m.get("to") != "*" else "everyone"
+        lines.append(f"- {who} → {dest}: {m.get('text', '')}")
+    return "\n".join(lines)
 
 
 def format_transcript(messages: list[dict[str, Any]], limit: int = 20) -> str:
@@ -77,19 +95,38 @@ def format_transcript(messages: list[dict[str, Any]], limit: int = 20) -> str:
 
 def run_agent(provider: ChatProvider, agent: AgentSpec, engine) -> dict[str, Any]:
     framework = engine.framework
+    action_names = {a.name for a in framework.actions}
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(framework, agent)}
     ]
+    inbox = engine.unread_messages(agent.name)
     user = (
         f"Turn {engine.turn}.\n\nCurrent game state (authoritative):\n"
-        f"{json.dumps(engine.public_state(), indent=2)}\n\n"
-        f"Shared transcript:\n{format_transcript(engine.messages)}"
+        f"{json.dumps(engine.public_state(), indent=2)}\n"
+        f"{_format_inbox(inbox)}\n"
+        f"\nShared transcript:\n{format_transcript(engine.messages)}"
     )
     messages.append({"role": "user", "content": user})
     tools = all_tools(framework)
 
     for _ in range(engine.max_steps_per_turn):
         resp = provider.chat(messages, tools=tools)
+
+        engine.record(
+            {
+                "type": "assistant",
+                "turn": engine.turn,
+                "agent": agent.name,
+                "content": resp.content,
+                "reasoning": resp.reasoning,
+            }
+        )
+        if resp.content:
+            engine.emit({"type": "assistant", "agent": agent.name, "content": resp.content})
+        if resp.reasoning:
+            engine.emit({"type": "reasoning", "agent": agent.name, "reasoning": resp.reasoning})
+
         assistant: dict[str, Any] = {"role": "assistant", "content": resp.content or None}
         api_tcs = _tool_calls_to_api(resp.tool_calls)
         if api_tcs:
@@ -106,6 +143,42 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine) -> dict[str, Any
                 result = engine.dispatch_tool(tc.name, tc.arguments, agent.name)
             except Exception as e:  # noqa: BLE001
                 result = json.dumps({"error": str(e)})
+            engine.record(
+                {
+                    "type": "tool_call",
+                    "turn": engine.turn,
+                    "agent": agent.name,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                }
+            )
+            engine.record(
+                {
+                    "type": "tool_result",
+                    "turn": engine.turn,
+                    "agent": agent.name,
+                    "name": tc.name,
+                    "result": result,
+                }
+            )
+            engine.emit(
+                {
+                    "type": "tool",
+                    "agent": agent.name,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "result": result,
+                }
+            )
+            if tc.name in action_names:
+                engine.record(
+                    {
+                        "type": "state",
+                        "turn": engine.turn,
+                        "label": f"after {tc.name}",
+                        "state": engine.public_state(),
+                    }
+                )
             messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": result}
             )

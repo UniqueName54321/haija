@@ -13,6 +13,9 @@ calls.
 - 🧭 **The framework is the truth** — world state, rules, and win/lose conditions live in one file; agents can only see and change the world through tools.
 - 🤖 **Customizable agents** — each agent gets its own name, personality, and (optionally) model.
 - 🔌 **OpenRouter by default** — any OpenAI-compatible endpoint works too.
+- 💬 **Agents talk to each other** — `send_message` lets agents coordinate, negotiate, and bluff mid-game, with a per-agent inbox.
+- 🖥️ **Basic GUI** — `haija gui` opens a Tkinter window to run and watch games live.
+- 📄 **Export the whole run** — responses, tool calls, and chain-of-thought, saved as a human-readable `.txt`.
 
 ## How it works
 
@@ -74,6 +77,8 @@ haija run
 | `haija new <name>` | Scaffold a new project (config + empty framework) |
 | `haija generate "<prompt>"` | Generate `framework.json` from a prompt via your model |
 | `haija run` | Play the game: run the agents through the turn loop |
+| `haija gui` | Launch the graphical interface |
+| `haija export [-o out.txt]` | Export the last run as a human-readable `.txt` |
 | `haija validate` | Load and sanity-check the project's framework |
 | `haija --version` | Print the version |
 
@@ -160,13 +165,38 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
+## Watching & exporting
+
+Run from a terminal (`haija run`) and you'll see the live stream: agent
+responses, chain-of-thought, tool calls, and chat. Or open the GUI:
+
+```sh
+haija gui
+```
+
+The GUI (a basic Tkinter window — needs `python3-tk` on Linux, or a Python that
+ships Tk on Windows/macOS) lets you pick a project, run the game, watch it live
+in the log pane, and export everything with one click.
+
+When a game finishes, Haija saves `run.json` (the full structured log), the
+final `state.json`, and a `transcript.json` into the project directory. Turn
+the whole run — responses, tool calls, and thinking — into a single `.txt`:
+
+```sh
+haija export            # writes haija-export.txt
+haija export -o out.txt # or anywhere you like
+```
+
+The export includes the framework, every turn's responses, tool calls and
+results, chain-of-thought, chat messages, and the final state.
+
 ## Roadmap
 
 - **Rule guards + a deterministic judge** — automatic win/lose detection instead
   of agent-declared outcomes, plus validation of action legality.
 - **Offline effect simulation** — resolve actions without an LLM in the loop.
 - **Hidden information & memory** — per-agent private state, alliances.
-- **Viewer / playback** — a web UI and transcript replay.
+- **Richer viewer / replay** — a web UI and turn-by-turn playback (the basic Tkinter GUI already ships).
 
 ## License
 

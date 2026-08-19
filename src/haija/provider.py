@@ -26,6 +26,7 @@ class ToolCall:
 class ChatResponse:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning: str = ""
 
 
 class ProviderError(RuntimeError):
@@ -90,6 +91,15 @@ class ChatProvider:
             raise ProviderError(f"Unexpected response shape: {body}") from e
 
         content = message.get("content") or ""
+        # OpenRouter exposes chain-of-thought via `reasoning`; some providers use
+        # `reasoning_content`. Capture either so it can be exported as "thinking".
+        reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+        if isinstance(reasoning, list):
+            reasoning = "".join(
+                (p.get("text") or "") if isinstance(p, dict) else str(p)
+                for p in reasoning
+            )
+        reasoning = reasoning or ""
         tool_calls = []
         for tc in message.get("tool_calls") or []:
             fn = tc.get("function") or {}
@@ -105,4 +115,4 @@ class ChatProvider:
             tool_calls.append(
                 ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=args)
             )
-        return ChatResponse(content=content, tool_calls=tool_calls)
+        return ChatResponse(content=content, tool_calls=tool_calls, reasoning=reasoning)
