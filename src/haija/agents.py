@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 from .config import AgentSpec
-from .provider import ChatProvider, ToolCall
+from .provider import ChatProvider, ToolCall, reasoning_param
 from .tools import all_tools
 
 
@@ -112,7 +112,7 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
     tools = all_tools(framework)
 
     for _ in range(engine.max_steps_per_turn):
-        resp = provider.chat(messages, tools=tools)
+        resp = provider.chat(messages, tools=tools, reasoning=reasoning_param(agent.thinking))
 
         engine.record(
             {

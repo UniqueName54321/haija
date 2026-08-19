@@ -2,7 +2,9 @@ import tempfile
 from pathlib import Path
 
 from haija.archetypes import BUILTIN_ARCHETYPES, Archetype
-from haija.config import AgentSpec, ModelConfig, ProjectConfig, dump_config
+from haija.config import AgentSpec, ModelConfig, ProjectConfig, THINKING_LEVELS, dump_config
+from haija.provider import reasoning_param
+from haija.project import haija_home, projects_root
 
 
 def test_builtin_archetypes_present():
@@ -125,3 +127,56 @@ def test_set_tone_and_save():
         cfg2.save(p)
         cfg3 = ProjectConfig.load(p)
         assert cfg3.tone == "grim"
+
+
+def test_agent_thinking_roundtrip():
+    cfg = ProjectConfig(
+        name="Think",
+        agents=[
+            AgentSpec(name="A", archetype="normie", thinking="high"),
+            AgentSpec(name="B", archetype="chaos", thinking="off"),
+            AgentSpec(name="C", archetype="scientist"),  # None
+        ],
+        model=ModelConfig(),
+    )
+    text = dump_config(cfg)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "haija.toml"
+        p.write_text(text, encoding="utf-8")
+        loaded = ProjectConfig.load(p)
+    assert loaded.agents[0].thinking == "high"
+    assert loaded.agents[1].thinking == "off"
+    assert loaded.agents[2].thinking is None
+
+
+def test_set_agent_thinking():
+    cfg = ProjectConfig(name="g", agents=[AgentSpec(name="A"), AgentSpec(name="B")], model=ModelConfig())
+    assert cfg.set_agent_thinking("A", "high")
+    assert cfg.agents[0].thinking == "high"
+    assert cfg.set_agent_thinking("A", None)
+    assert cfg.agents[0].thinking is None
+    assert not cfg.set_agent_thinking("Z", "low")
+    cfg.set_agent_thinking("B", "default")
+    assert cfg.agents[1].thinking is None
+    cfg.set_agent_thinking("A", "bogus")
+    assert cfg.agents[0].thinking is None  # invalid values → None
+
+
+def test_reasoning_param():
+    assert reasoning_param(None) is None
+    assert reasoning_param("") is None
+    assert reasoning_param("bogus") is None
+    assert reasoning_param("off") == {"enabled": False}
+    assert reasoning_param("low") == {"effort": "low"}
+    assert reasoning_param("medium") == {"effort": "medium"}
+    assert reasoning_param("high") == {"effort": "high"}
+
+
+def test_thinking_levels_constant():
+    assert THINKING_LEVELS == ("off", "low", "medium", "high")
+
+
+def test_projects_root():
+    root = projects_root()
+    assert root.name == "projects"
+    assert root.parent == haija_home()

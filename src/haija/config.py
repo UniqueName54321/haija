@@ -15,9 +15,13 @@ from typing import Any
 
 from .archetypes import BUILTIN_ARCHETYPES, Archetype
 
-DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct"
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+# Per-agent thinking depth, mapped to the provider's `reasoning` parameter.
+# "low" = fast/shallow, "medium" = balanced, "high" = deep/thorough, "off" = none.
+THINKING_LEVELS = ("off", "low", "medium", "high")
 
 
 @dataclass
@@ -28,6 +32,7 @@ class AgentSpec:
     description: str = ""
     model: str | None = None
     archetype: str | None = None
+    thinking: str | None = None  # None | "off" | "low" | "medium" | "high"
 
     def resolve_model(self, default: str) -> str:
         return self.model or default
@@ -106,6 +111,14 @@ class ProjectConfig:
     def set_tone(self, tone: str) -> None:
         self.tone = tone.strip()
 
+    def set_agent_thinking(self, name: str, level: str | None) -> bool:
+        """Set one agent's thinking depth; return False if the agent is unknown."""
+        for a in self.agents:
+            if a.name == name:
+                a.thinking = _thinking(level) if level else None
+                return True
+        return False
+
     def add_archetype(self, arch_id: str, name: str, persona: str) -> None:
         self.archetypes[arch_id] = Archetype(arch_id, name or arch_id, persona)
 
@@ -138,6 +151,7 @@ class ProjectConfig:
                 description=a.get("description", ""),
                 model=a.get("model"),
                 archetype=a.get("archetype"),
+                thinking=_thinking(a.get("thinking")),
             )
             for a in data.get("agents", [])
         ]
@@ -161,6 +175,14 @@ class ProjectConfig:
             max_steps_per_turn=int(data.get("max_steps_per_turn", 16)),
             path=path,
         )
+
+
+def _thinking(value: Any) -> str | None:
+    """Normalize a thinking level; unknown/invalid values fall back to None."""
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    return v if v in THINKING_LEVELS else None
 
 
 def _tstr(s: str) -> str:
@@ -204,6 +226,8 @@ def dump_config(cfg: ProjectConfig) -> str:
             L.append(f"description = {_tstr(a.description)}")
         if a.model:
             L.append(f"model = {_tstr(a.model)}")
+        if a.thinking:
+            L.append(f"thinking = {_tstr(a.thinking)}")
         L.append("")
 
     for arch in cfg.archetypes.values():
@@ -240,10 +264,12 @@ state_path = "state.json"
 [[agents]]
 name = "Alpha"
 archetype = "normie"
+# thinking = "high"               # per-agent thinking depth (off | low | medium | high)
 
 [[agents]]
 name = "Beta"
 archetype = "chaos"
+# thinking = "low"                # fast, shallow reasoning for this agent
 
 # Built-in archetypes: normie, chaos, cheat, baddie, speedrunner,
 # completionist, lawyer, scientist, contrarian.

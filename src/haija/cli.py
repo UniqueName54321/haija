@@ -12,7 +12,7 @@ from .config import ProjectConfig
 from .engine import Engine, render_export, run_game
 from .framework import load_framework
 from .generate import generate_framework
-from .project import new_project
+from .project import new_project, projects_root
 from .provider import ChatProvider, ProviderError
 
 
@@ -27,7 +27,8 @@ def _resolve_project(p: str) -> Path:
 
 
 def cmd_new(args: argparse.Namespace) -> int:
-    root = new_project(args.name, Path(args.dir))
+    dest = Path(args.dir) if args.dir else projects_root()
+    root = new_project(args.name, dest)
     print(f"Created Haija project '{args.name}' at {root}")
     print("Next: set OPENROUTER_API_KEY, then `haija generate \"<prompt>\"` and `haija run`.")
     return 0
@@ -172,7 +173,8 @@ def _print_options(cfg: ProjectConfig) -> None:
         arch = f" ({a.archetype})" if a.archetype else ""
         desc = f" — {a.description}" if a.description else ""
         model = f" [model={a.model}]" if a.model else ""
-        print(f"  • {a.name}{arch}{desc}{model}")
+        think = f" [thinking={a.thinking}]" if a.thinking else ""
+        print(f"  • {a.name}{arch}{desc}{model}{think}")
     built = list(BUILTIN_ARCHETYPES.values())
     custom = list(cfg.archetypes.values())
     print(f"\nArchetypes ({len(built)} built-in, {len(custom)} custom):")
@@ -218,6 +220,15 @@ def cmd_options(args: argparse.Namespace) -> int:
     if args.api_key_env:
         cfg.model.api_key_env = args.api_key_env
         changed = True
+    if args.agent_thinking:
+        for item in _split_ids(args.agent_thinking):
+            name, _, level = item.partition("=")
+            name = name.strip()
+            if not name:
+                continue
+            level = level.strip().lower()
+            cfg.set_agent_thinking(name, None if level in ("", "default") else level)
+        changed = True
 
     if changed:
         cfg.save()
@@ -236,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     n = sub.add_parser("new", help="create a new project")
     n.add_argument("name")
-    n.add_argument("--dir", default=".", help="parent directory (default: .)")
+    n.add_argument("--dir", default=None, help="parent directory (default: <haija home>/projects)")
     n.set_defaults(func=cmd_new)
 
     g = sub.add_parser("generate", help="generate a framework from a prompt")
@@ -276,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--base-url", default=None, help="set the API base URL")
     o.add_argument("--provider", default=None, help="set the provider name")
     o.add_argument("--api-key-env", default=None, help="set the API key env var")
+    o.add_argument("--agent-thinking", default=None, metavar="NAME=LEVEL[,...]", help="set per-agent thinking (off|low|medium|high|default), comma-separated")
     o.set_defaults(func=cmd_options)
 
     args = p.parse_args(argv)

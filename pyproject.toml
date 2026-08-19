@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haija"
-version = "0.3.1"
+version = "0.4.0"
 description = "Haija — an AI game engine where agents play the game. Generate a framework file from a prompt, then watch customizable agents play it."
 readme = "README.md"
 requires-python = ">=3.11"

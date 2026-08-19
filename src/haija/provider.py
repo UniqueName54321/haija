@@ -33,6 +33,23 @@ class ProviderError(RuntimeError):
     """Raised on transport, auth, or response-shape errors."""
 
 
+def reasoning_param(thinking: str | None) -> dict[str, Any] | None:
+    """Map a per-agent thinking level to the provider's ``reasoning`` payload.
+
+    None → no override (model default). "off" disables reasoning; "low"/
+    "medium"/"high" set the reasoning effort (fast → deep). OpenRouter
+    normalizes ``reasoning.effort`` across providers that support it.
+    """
+    if not thinking:
+        return None
+    level = str(thinking).strip().lower()
+    if level == "off":
+        return {"enabled": False}
+    if level in ("low", "medium", "high"):
+        return {"effort": level}
+    return None
+
+
 class ChatProvider:
     def __init__(self, config: ModelConfig):
         self.config = config
@@ -57,6 +74,7 @@ class ChatProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         json_mode: bool = False,
+        reasoning: dict[str, Any] | None = None,
     ) -> ChatResponse:
         if not self.api_key:
             raise ProviderError(
@@ -69,6 +87,8 @@ class ChatProvider:
             payload["tools"] = tools
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if reasoning:
+            payload["reasoning"] = reasoning
 
         req = urllib.request.Request(
             self._url(),

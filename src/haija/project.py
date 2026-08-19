@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .config import default_config
 from .framework import SCHEMA_VERSION
 
 
-def new_project(name: str, dest: Path) -> Path:
+def haija_home() -> Path:
+    """The Haija home directory (``~/.haija``, or ``$HAIJA_HOME``)."""
+    env = os.environ.get("HAIJA_HOME")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".haija"
+
+
+def projects_root() -> Path:
+    """Default parent directory for new projects: ``<haija home>/projects``."""
+    return haija_home() / "projects"
+
+
+def new_project(name: str, dest: Path | None = None) -> Path:
+    dest = dest or projects_root()
     root = dest / name
     root.mkdir(parents=True, exist_ok=False)
     (root / "haija.toml").write_text(default_config(name), encoding="utf-8")

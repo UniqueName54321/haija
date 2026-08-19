@@ -11,13 +11,14 @@ calls.
 
 - 🎲 **Prompt → framework** — `haija generate "a 1v1 wizard duel"` produces a machine-readable game.
 - 🧭 **The framework is the truth** — world state, rules, and win/lose conditions live in one file; agents can only see and change the world through tools.
-- 🤖 **Customizable agents** — each agent gets its own name, personality, and (optionally) model.
+- 🤖 **Customizable agents** — each agent gets its own name, personality, model, and thinking depth.
 - 🎭 **Archetypes** — 9 built-in personalities (Normie, Chaos, Cheat, Baddie, Speedrunner, Completionist, Lawyer, Scientist, Contrarian). Enable/disable them or write your own.
 - 🎚️ **Game tone** — one tone applied to every agent, set from the options menu.
 - 🔌 **OpenRouter by default** — any OpenAI-compatible endpoint works too.
 - 💬 **Agents talk to each other** — `send_message` lets agents coordinate, negotiate, and bluff mid-game, with a per-agent inbox.
 - 🖥️ **Browser GUI** — `haija gui` starts a local server and opens a web UI in your browser (no Tkinter, full CLI parity).
 - 📄 **Export the whole run** — responses, tool calls, and chain-of-thought, saved as a human-readable `.txt`.
+- 🔁 **Replay viewer** — scrub through a finished run turn-by-turn in the GUI.
 
 ## How it works
 
@@ -53,8 +54,8 @@ pip install -e .
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
 
-haija new my-game
-cd my-game
+haija new my-game                 # created at ~/.haija/projects/my-game
+cd ~/.haija/projects/my-game      # (pass --dir to put it somewhere else)
 
 # (optional) generate a framework from a prompt
 haija generate "two rival AIs negotiate a trade deal"
@@ -76,14 +77,14 @@ haija run
 
 | Command | What it does |
 |---|---|
-| `haija new <name>` | Scaffold a new project (config + empty framework) |
+| `haija new <name>` | Scaffold a new project (defaults to `~/.haija/projects/<name>`) |
 | `haija generate "<prompt>"` | Generate `framework.json` from a prompt via your model |
 | `haija run` | Play the game: run the agents through the turn loop |
 | `haija gui` | Launch the graphical interface |
 | `haija export [-o out.txt]` | Export the last run as a human-readable `.txt` |
 | `haija validate` | Load and sanity-check the project's framework |
 | `haija archetypes` | List built-in + project archetypes and active agents |
-| `haija options` | View and edit tone, archetypes, and model (see `--help`) |
+| `haija options` | View and edit tone, archetypes, model, and per-agent thinking |
 | `haija --version` | Print the version |
 
 All commands accept `--project <path>` (a project dir or a `haija.toml` path),
@@ -165,6 +166,7 @@ name = "Beta"
 archetype = "scientist"             # experiments to learn the mechanics
 description = "obsessively tidy"     # optional extra flavor
 model = "openai/gpt-4o-mini"         # optional per-agent override
+thinking = "high"                    # optional per-agent reasoning depth
 
 [[agents]]
 name = "Carla"                       # a plain agent with no archetype
@@ -178,10 +180,16 @@ persona = "Tries to turn every action into a punchline."
 
 [model]
 provider = "openrouter"
-model = "meta-llama/llama-3.3-70b-instruct"
+model = "deepseek/deepseek-v4-flash"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 ```
+
+For reasoning-capable models (like the default `deepseek/deepseek-v4-flash`),
+each agent can set a **thinking depth** — `off`, `low`, `medium`, or `high`
+(mapped to the provider's reasoning effort). Omit it to use the model default.
+Set it from the GUI's Options menu or with
+`haija options --agent-thinking Alpha=high,Beta=low`.
 
 ## Archetypes & tone
 
@@ -221,6 +229,10 @@ the CLI: create or open a project, generate a framework from a prompt, validate
 it, run and watch the game live, tweak options (archetypes, tone, and model),
 and export everything with one click.
 
+After a run, click **Replay** in the GUI to step through it turn by turn —
+state snapshots, each agent's response and chain-of-thought, tool calls, chat,
+and the final state — with a scrubber and auto-play.
+
 When a game finishes, Haija saves `run.json` (the full structured log), the
 final `state.json`, and a `transcript.json` into the project directory. Turn
 the whole run — responses, tool calls, and thinking — into a single `.txt`:
@@ -239,7 +251,6 @@ results, chain-of-thought, chat messages, and the final state.
   of agent-declared outcomes, plus validation of action legality.
 - **Offline effect simulation** — resolve actions without an LLM in the loop.
 - **Hidden information & memory** — per-agent private state, alliances.
-- **Richer viewer / replay** — turn-by-turn playback and replay of past runs.
 
 ## License
 

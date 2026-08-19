@@ -24,7 +24,7 @@ from .config import ProjectConfig
 from .engine import Engine, run_game
 from .framework import load_framework
 from .generate import generate_framework
-from .project import new_project
+from .project import new_project, projects_root
 from .provider import ChatProvider, ProviderError
 
 DEFAULT_PORT = 8657
@@ -148,6 +148,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_status()
         elif path == "/api/events":
             self._api_events()
+        elif path == "/api/replay":
+            self._api_replay()
         elif path == "/api/download":
             self._api_download()
         else:
@@ -186,7 +188,12 @@ class Handler(BaseHTTPRequestHandler):
                 "model_base_url": s.cfg.model.base_url,
                 "model_api_key_env": s.cfg.model.api_key_env,
                 "agents": [
-                    {"name": a.name, "archetype": a.archetype, "description": a.description}
+                    {
+                        "name": a.name,
+                        "archetype": a.archetype,
+                        "description": a.description,
+                        "thinking": a.thinking,
+                    }
                     for a in s.cfg.agents
                 ],
                 "archetypes": archetypes,
@@ -201,6 +208,41 @@ class Handler(BaseHTTPRequestHandler):
             since = 0
         events = self.state.events[since:]
         self._send_json({"events": events, "next": len(self.state.events)})
+
+    def _api_replay(self) -> None:
+        s = self.state
+        if not s.cfg:
+            self._send_json({"ok": False, "message": "open a project first"})
+            return
+        base = s.toml_path.parent
+        run_path = base / "run.json"
+        if not run_path.exists():
+            self._send_json({"ok": False, "message": "no run yet — run a game first"})
+            return
+        try:
+            run_log = json.loads(run_path.read_text(encoding="utf-8"))
+            fw = load_framework(base / s.cfg.framework_path)
+            state_path = base / s.cfg.state_path
+            final_state = (
+                json.loads(state_path.read_text(encoding="utf-8"))
+                if state_path.exists()
+                else {}
+            )
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"ok": False, "message": str(e)})
+            return
+        self._send_json(
+            {
+                "ok": True,
+                "name": fw.name,
+                "description": fw.description,
+                "objective": fw.objective,
+                "agents": [a.name for a in s.cfg.agents],
+                "max_turns": fw.turn.max_turns,
+                "run_log": run_log,
+                "final_state": final_state,
+            }
+        )
 
     def _api_download(self) -> None:
         p = self.state.export_path
@@ -253,12 +295,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_new(self, body: dict) -> None:
         name = (body.get("name") or "").strip()
-        directory = (body.get("dir") or "").strip() or "."
+        directory = (body.get("dir") or "").strip()
         if not name:
             self._send_json({"ok": False, "message": "project name is required"})
             return
+        dest = Path(directory) if directory else projects_root()
         try:
-            root = new_project(name, Path(directory))
+            root = new_project(name, dest)
         except FileExistsError:
             self._send_json({"ok": False, "message": f"'{name}' already exists"})
             return
@@ -357,6 +400,10 @@ class Handler(BaseHTTPRequestHandler):
             enabled = set(body["enabled_archetypes"])
             for arch_id in list(cfg.all_archetypes()):
                 cfg.set_archetype_enabled(arch_id, arch_id in enabled)
+        if body.get("agent_thinking"):
+            for name, level in body["agent_thinking"].items():
+                lvl = str(level or "").strip().lower()
+                cfg.set_agent_thinking(name, None if lvl in ("", "default") else lvl)
         try:
             cfg.save(s.toml_path)
         except Exception as e:  # noqa: BLE001

@@ -125,6 +125,7 @@
     border-radius: 10px;
     width: min(680px, 92vw);
     max-height: 86vh;
+    overflow-y: auto;
     display: flex; flex-direction: column;
     padding: 18px;
   }
@@ -146,6 +147,34 @@
   .arch-list label:hover { background: var(--panel-2); border-radius: 5px; }
   .arch-list .pers { color: var(--muted); font-size: 12px; }
   .modal .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+  /* Per-agent thinking */
+  .agent-think-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; }
+  .agent-think-row span { flex: 1; }
+  .agent-think-row select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px;
+  }
+
+  /* Replay overlay */
+  .replay-modal { width: min(940px, 96vw); height: 90vh; overflow: hidden; }
+  .replay-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .replay-head h2 { margin: 0 0 4px; }
+  .replay-meta { font-size: 13px; color: var(--muted); }
+  .replay-controls { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .replay-controls input[type="range"] { flex: 1; }
+  .rp-label { font-family: var(--mono); font-size: 13px; min-width: 90px; text-align: center; }
+  .replay-body { flex: 1; overflow-y: auto; margin-top: 10px; font-family: var(--mono); font-size: 12.5px; }
+  .rp-entry { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .rp-entry .rp-head { padding: 6px 10px; font-weight: 600; background: var(--panel-2); }
+  .rp-entry pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; background: #0b0d17; font: inherit; }
+  .rp-entry details summary { padding: 6px 10px; cursor: pointer; color: var(--accent-2); background: var(--panel-2); }
+  .rp-entry details pre { border-top: 1px solid var(--border); }
+  .rp-state .rp-head { color: var(--muted); }
+  .rp-agent .rp-head { color: var(--accent-2); }
+  .rp-tool .rp-head { color: var(--warn); }
+  .rp-chat .rp-head { color: var(--ok); }
+  .rp-outcome .rp-head { color: var(--err); }
 </style>
 </head>
 <body>
@@ -181,6 +210,7 @@
       <button id="btn-validate">Validate</button>
       <button id="btn-run" class="primary">Run</button>
       <button id="btn-export">Export</button>
+      <button id="btn-replay">Replay</button>
     </div>
   </aside>
 
@@ -202,6 +232,10 @@
       <input type="text" id="opt-tone" placeholder="e.g. whimsical and cutthroat" />
     </div>
     <div class="row">
+      <label>Thinking depth per agent (off / low / medium / high)</label>
+      <div id="opt-agents"></div>
+    </div>
+    <div class="row">
       <label>Archetypes (check = add as an agent)</label>
       <div class="arch-list" id="opt-archs"></div>
     </div>
@@ -221,6 +255,27 @@
       <button id="opt-cancel">Cancel</button>
       <button id="opt-save" class="primary">Save options</button>
     </div>
+  </div>
+</div>
+
+<!-- Replay overlay -->
+<div class="overlay hidden" id="replay-overlay">
+  <div class="modal replay-modal">
+    <div class="replay-head">
+      <div>
+        <h2 id="replay-title">Replay</h2>
+        <div class="replay-meta" id="replay-meta"></div>
+      </div>
+      <button id="replay-close">✕</button>
+    </div>
+    <div class="replay-controls">
+      <button id="rp-prev">◀</button>
+      <button id="rp-play" class="primary">▶ Play</button>
+      <button id="rp-next">▶</button>
+      <input type="range" id="rp-slider" min="0" max="0" value="0" />
+      <span class="rp-label" id="rp-label">Setup</span>
+    </div>
+    <div class="replay-body" id="rp-body"></div>
   </div>
 </div>
 
@@ -337,7 +392,7 @@ async function doOpen() {
 async function doNew() {
   const name = prompt('New project name:');
   if (!name) return;
-  const dir = prompt('Directory:', '.') || '.';
+  const dir = prompt('Directory (blank = ~/.haija/projects):', '') || '';
   const r = await api('/api/new', 'POST', { name, dir });
   logLine(r.ok ? r.message : `[error] ${r.message}`, r.ok ? '' : 'outcome');
   if (r.ok) { clearLog(); await loadStatus(); setStatus(`Created ${name}`); }
@@ -390,21 +445,153 @@ async function openOptions() {
     label.appendChild(span);
     list.appendChild(label);
   });
+  const agentsEl = $('opt-agents');
+  agentsEl.innerHTML = '';
+  (s.agents || []).forEach(a => {
+    const row = document.createElement('div');
+    row.className = 'agent-think-row';
+    const name = document.createElement('span');
+    name.textContent = a.name;
+    const sel = document.createElement('select');
+    sel.dataset.agent = a.name;
+    [['', 'default'], ['off', 'off'], ['low', 'low (fast)'], ['medium', 'medium'], ['high', 'high (deep)']].forEach(([val, label]) => {
+      const opt = document.createElement('option');
+      opt.value = val; opt.textContent = label;
+      if ((a.thinking || '') === val) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    row.appendChild(name); row.appendChild(sel);
+    agentsEl.appendChild(row);
+  });
   $('opts-overlay').classList.remove('hidden');
 }
 function closeOptions() { $('opts-overlay').classList.add('hidden'); }
 async function saveOptions() {
   const enabled = Array.from(document.querySelectorAll('#opt-archs input:checked')).map(cb => cb.dataset.id);
+  const agentThinking = {};
+  document.querySelectorAll('#opt-agents select').forEach(sel => { agentThinking[sel.dataset.agent] = sel.value; });
   const r = await api('/api/options', 'POST', {
     tone: $('opt-tone').value,
     model: $('opt-model').value,
     base_url: $('opt-base-url').value,
     api_key_env: $('opt-api-key-env').value,
     enabled_archetypes: enabled,
+    agent_thinking: agentThinking,
   });
   closeOptions();
   logLine(r.message, r.ok ? '' : 'outcome');
   await loadStatus();
+}
+
+// ---- replay ----
+let replayData = null;
+let replayTurns = [];
+let replayIndex = 0;
+let replayTimer = null;
+
+function rpHeader(text) {
+  const d = document.createElement('div');
+  d.className = 'rp-head';
+  d.textContent = text;
+  return d;
+}
+function rpPre(text) {
+  const p = document.createElement('pre');
+  p.textContent = text;
+  return p;
+}
+function rpCollapsible(title, content, open) {
+  const det = document.createElement('details');
+  if (open) det.open = true;
+  const sum = document.createElement('summary');
+  sum.textContent = title;
+  det.appendChild(sum);
+  det.appendChild(rpPre(content));
+  return det;
+}
+function renderReplayEntry(e) {
+  const div = document.createElement('div');
+  div.className = 'rp-entry';
+  const t = e.type;
+  if (t === 'state') {
+    div.classList.add('rp-state');
+    div.appendChild(rpCollapsible(`state · ${e.label || ''}`, JSON.stringify(e.state, null, 2)));
+  } else if (t === 'assistant') {
+    div.classList.add('rp-agent');
+    div.appendChild(rpHeader(`${e.agent} → response`));
+    div.appendChild(rpPre(e.content || '(no text)'));
+    if (e.reasoning) div.appendChild(rpCollapsible(`${e.agent} → thinking`, e.reasoning));
+  } else if (t === 'tool_call') {
+    div.classList.add('rp-tool');
+    div.appendChild(rpHeader(`${e.agent} → ${e.name}(${JSON.stringify(e.arguments || {})})`));
+  } else if (t === 'tool_result') {
+    div.classList.add('rp-tool');
+    div.appendChild(rpCollapsible(`↳ ${e.name} result`, String(e.result ?? ''), true));
+  } else if (t === 'message') {
+    div.classList.add('rp-chat');
+    div.appendChild(rpHeader(`💬 ${e.from} → ${e.to}: ${e.text}`));
+  } else if (t === 'log') {
+    div.classList.add('rp-chat');
+    div.appendChild(rpHeader(`📝 ${e.from}: ${e.text}`));
+  } else if (t === 'outcome') {
+    div.classList.add('rp-outcome');
+    div.appendChild(rpHeader(`${e.from} declares ${e.outcome} (winner ${e.winner || '?'})`));
+    if (e.reason) div.appendChild(rpPre(e.reason));
+  } else {
+    div.appendChild(rpPre(JSON.stringify(e, null, 2)));
+  }
+  return div;
+}
+function replayEntriesFor(turn) {
+  return (replayData.run_log || []).filter(e => (e.turn ?? 0) === turn);
+}
+function renderReplayTurn() {
+  const turn = replayTurns[replayIndex];
+  $('rp-slider').value = replayIndex;
+  $('rp-label').textContent = turn === 0 ? 'Setup' : `Turn ${turn}`;
+  $('rp-prev').disabled = replayIndex <= 0;
+  $('rp-next').disabled = replayIndex >= replayTurns.length - 1;
+  const body = $('rp-body');
+  body.innerHTML = '';
+  replayEntriesFor(turn).forEach(e => body.appendChild(renderReplayEntry(e)));
+  if (replayIndex === replayTurns.length - 1 && replayData.final_state) {
+    const div = document.createElement('div');
+    div.className = 'rp-entry rp-outcome';
+    div.appendChild(rpHeader('FINAL STATE'));
+    div.appendChild(rpPre(JSON.stringify(replayData.final_state, null, 2)));
+    body.appendChild(div);
+  }
+  body.scrollTop = 0;
+}
+function stopReplayTimer() {
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+  $('rp-play').textContent = '▶ Play';
+}
+function toggleReplayPlay() {
+  if (replayTimer) { stopReplayTimer(); return; }
+  $('rp-play').textContent = '⏸ Pause';
+  replayTimer = setInterval(() => {
+    if (replayIndex >= replayTurns.length - 1) { stopReplayTimer(); return; }
+    replayIndex++;
+    renderReplayTurn();
+  }, 1500);
+}
+async function doReplay() {
+  stopReplayTimer();
+  const r = await api('/api/replay');
+  if (!r.ok) { logLine(`[replay] ${r.message}`, 'outcome'); return; }
+  replayData = r;
+  replayTurns = Array.from(new Set((r.run_log || []).map(e => e.turn ?? 0))).sort((a, b) => a - b);
+  replayIndex = 0;
+  $('replay-title').textContent = r.name;
+  $('replay-meta').textContent = `${(r.agents || []).join(', ')}${r.objective ? ' — ' + r.objective : ''}`;
+  $('rp-slider').max = Math.max(0, replayTurns.length - 1);
+  $('replay-overlay').classList.remove('hidden');
+  renderReplayTurn();
+}
+function closeReplay() {
+  stopReplayTimer();
+  $('replay-overlay').classList.add('hidden');
 }
 
 $('btn-open').onclick = doOpen;
@@ -418,6 +605,13 @@ $('btn-clear').onclick = clearLog;
 $('opt-cancel').onclick = closeOptions;
 $('opt-save').onclick = saveOptions;
 $('opts-overlay').addEventListener('click', (e) => { if (e.target === $('opts-overlay')) closeOptions(); });
+$('btn-replay').onclick = doReplay;
+$('replay-close').onclick = closeReplay;
+$('rp-prev').onclick = () => { if (replayIndex > 0) { replayIndex--; renderReplayTurn(); } };
+$('rp-next').onclick = () => { if (replayIndex < replayTurns.length - 1) { replayIndex++; renderReplayTurn(); } };
+$('rp-play').onclick = toggleReplayPlay;
+$('rp-slider').addEventListener('input', () => { replayIndex = +$('rp-slider').value; renderReplayTurn(); });
+$('replay-overlay').addEventListener('click', (e) => { if (e.target === $('replay-overlay')) closeReplay(); });
 
 loadStatus();
 </script>
