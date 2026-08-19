@@ -181,7 +181,9 @@ Action effects are atomic: if any effect fails, the complete action is rolled
 back. The engine owns `turn_index`, `direction`, and skip resolution, and card
 games automatically end when a successful hand-changing action empties the
 actor's hand. Agents see their own hand but only the card counts of opponents;
-deck contents are hidden.
+deck contents are hidden. Card-game views expose an authoritative `top_card`,
+`discard_count`, `next_actor`, and `next_turn_actor`; raw discard history and
+its internal storage orientation are not exposed to agents.
 
 ```json
 { "name": "place_mark", "effects": ["..."],

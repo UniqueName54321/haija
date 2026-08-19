@@ -247,6 +247,8 @@ Effect rules:
   NOT use `not_exists`: an existing draw pile is required, not forbidden.
 - Capture or append a selected list item before removing it. Conditional card
   effects must inspect the selected card as it existed before removal.
+- Treat `top_card` as the authoritative current discard. Do not infer the top
+  from raw discard history or describe an array-end convention to agents.
 - "path" is a dot-separated path into the state, e.g. "board.0" or
   "players.Alice.hp". List indices are integers.
 - Path segments and values may contain templates: {{actor}}, {{mark}},

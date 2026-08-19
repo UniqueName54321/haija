@@ -85,6 +85,9 @@ class Engine:
         if "hands" in self.state and isinstance(self.state["hands"], dict) and not self.state["hands"]:
             self.state["hands"] = {a: [] for a in self.agents}
         self._resolve_setup_state()
+        discard = self._discard_pile()
+        if discard is not None:
+            self.state["top_card"] = copy.deepcopy(discard[0]) if discard else None
         if self.agents and "turn_index" in self.state:
             self.state["turn_index"] = int(self.state.get("turn_index", 0)) % len(self.agents)
 
@@ -134,9 +137,9 @@ class Engine:
         if discard is not None and not discard and deck:
             card = self._pop_initial_discard(deck)
             discard.append(card)
-            for key in ("top_card", "current_card"):
-                if key in self.state:
-                    self.state[key] = copy.deepcopy(card)
+            self.state["top_card"] = copy.deepcopy(card)
+            if "current_card" in self.state:
+                self.state["current_card"] = copy.deepcopy(card)
             color, value = self._card_attributes(card)
             if color is not None:
                 for key in ("current_color", "active_color"):
@@ -233,6 +236,23 @@ class Engine:
         view = copy.deepcopy(self.state)
         if viewer is None:
             return view
+        discard = self._discard_pile()
+        if discard is not None:
+            top = copy.deepcopy(discard[0]) if discard else None
+            view["top_card"] = top
+            view["discard_count"] = len(discard)
+            # Do not expose storage orientation as game semantics. Agents only
+            # need the authoritative top and count for legal play.
+            for key in ("discard_pile", "discard", "played_cards", "discardPile"):
+                if isinstance(view.get(key), list):
+                    view[key] = {"top": top, "count": len(discard), "history_hidden": True}
+        if self.agents:
+            skip = int(self.state.get("skip_count", 0) or 0)
+            if self.state.get("skip_next"):
+                skip = max(skip, 1)
+            view["current_actor"] = self.current_actor()
+            view["next_actor"] = self.next_actor()
+            view["next_turn_actor"] = self.next_actor(1 + skip)
         hands = view.get("hands")
         if isinstance(hands, dict):
             for name, hand in list(hands.items()):
@@ -486,6 +506,7 @@ class Engine:
             target = self._navigate(segs)
             if self._is_discard_path(segs):
                 target.insert(0, value)
+                self.state["top_card"] = copy.deepcopy(value)
             else:
                 target.append(value)
             return {"op": "append", "path": path, "value": value}
@@ -558,9 +579,9 @@ class Engine:
             for key in ("current_number", "current_value"):
                 if key in self.state:
                     self.state[key] = value
-        for key in ("current_card", "top_card"):
-            if key in self.state:
-                self.state[key] = copy.deepcopy(card)
+        self.state["top_card"] = copy.deepcopy(card)
+        if "current_card" in self.state:
+            self.state["current_card"] = copy.deepcopy(card)
         if "reverse" in lower and "reverse_direction" not in declared:
             self.state["direction"] = -int(self.state.get("direction", 1) or 1)
         draw_count = 4 if ("wild4" in lower or "draw4" in lower or "+4" in lower) else 2 if ("draw2" in lower or "+2" in lower) else 0

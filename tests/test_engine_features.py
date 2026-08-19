@@ -340,6 +340,21 @@ def test_agent_state_view_hides_other_hands_and_deck():
     assert view["deck"] == {"count": 3, "hidden": True}
 
 
+def test_agent_card_view_exposes_top_and_authoritative_turn_targets_without_history_orientation():
+    e = Engine(Framework.from_dict({"name": "Cards", "initial_state": {
+        "hands": {"A": ["R1"], "B": ["B1"], "C": ["G1"]},
+        "discard_pile": ["GDraw2", "R5", "Y3"],
+        "turn_index": 2, "direction": 1, "skip_count": 1,
+    }, "actions": []}), ["A", "B", "C"])
+    view = e.public_state("C")
+    assert view["top_card"] == "GDraw2"
+    assert view["discard_count"] == 3
+    assert view["discard_pile"] == {"top": "GDraw2", "count": 3, "history_hidden": True}
+    assert view["current_actor"] == "C"
+    assert view["next_actor"] == "A"  # Draw/Skip target
+    assert view["next_turn_actor"] == "B"  # actor after the pending skip
+
+
 def test_empty_hand_wins_automatically():
     fw = Framework.from_dict({"name": "Cards", "initial_state": {
         "hands": {"A": ["R1"]}, "discard_pile": []}, "actions": [_card_action()]})

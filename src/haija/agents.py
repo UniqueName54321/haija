@@ -45,7 +45,13 @@ recall_all) that no other agent can see — use it to track plans, suspicions, o
 secret information. You may form and break alliances (form_alliance /
 break_alliance). Some actions may be rejected if they're illegal — the engine
 enforces the rules, so read any error and try a legal move instead. Play to
-win, be decisive, and call end_turn when done."""
+win, be decisive, and call end_turn when done.
+
+For card games, `top_card` is the authoritative card currently in play;
+`discard_pile` is a summarized object, not an ordered public history. Use
+`next_actor` for the player targeted by a newly played Draw/Skip card and
+`next_turn_actor` for who will act after pending skip effects. Never infer
+either from array position or from the transcript."""
 
 
 def _tool_calls_to_api(tool_calls: list[ToolCall]) -> list[dict[str, Any]] | None:
