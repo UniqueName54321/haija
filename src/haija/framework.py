@@ -240,6 +240,11 @@ Effect rules:
   {{params.x}}, {{state.some.key}}, {{turn}}, {{now}}.
 - Every action agents need MUST be listed under "actions"; agents change state
   only through actions. The engine is the single source of truth.
+- `initial_state` MUST be immediately playable on turn 1. Never emit an
+  unresolved setup/loading/dealing phase, empty required hands, or a state that
+  expects an agent to initialize the game. Put all setup results directly in
+  `initial_state`; the engine only injects configured agent names into empty
+  `players` and `hands` mappings.
 
 Guard rules (optional):
 - An action may have a "guard" list of conditions that MUST all be true for the

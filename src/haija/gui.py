@@ -45,6 +45,8 @@ class HaijaState:
     events: list[dict[str, Any]] = field(default_factory=list)
     busy: bool = False
     worker_thread: threading.Thread | None = None
+    provider: ChatProvider | None = None
+    stop_requested: bool = False
 
     def add_event(self, event: dict[str, Any]) -> None:
         self.events.append(event)
@@ -66,6 +68,7 @@ def _read_index_html() -> str:
 def _run_thread(state: HaijaState) -> None:
     try:
         provider = ChatProvider(state.cfg.model)
+        state.provider = provider
         engine = Engine(
             state.fw,
             [a.name for a in state.cfg.agents],
@@ -75,18 +78,22 @@ def _run_thread(state: HaijaState) -> None:
         persist_msg = run_game(engine, provider, state.cfg, observer=state.add_event)
         state.add_event({"type": "info", "message": persist_msg})
     except ProviderError as e:
-        state.add_event({"type": "error", "message": str(e)})
+        event_type = "info" if state.stop_requested else "error"
+        state.add_event({"type": event_type, "message": str(e)})
     except Exception as e:  # noqa: BLE001
-        state.add_event({"type": "error", "message": str(e)})
+        event_type = "info" if state.stop_requested else "error"
+        state.add_event({"type": event_type, "message": str(e)})
     finally:
         state.add_event({"type": "done"})
         state.busy = False
+        state.provider = None
 
 
 def _generate_thread(state: HaijaState, prompt: str) -> None:
     try:
         provider = ChatProvider(state.cfg.model)
-        fw = generate_framework(provider, prompt, name=state.cfg.name)
+        state.provider = provider
+        fw = generate_framework(provider, prompt, name=state.cfg.name, observer=state.add_event)
         out = state.toml_path.parent / state.cfg.framework_path
         out.write_text(json.dumps(fw.to_dict(), indent=2) + "\n", encoding="utf-8")
         state.fw = fw
@@ -96,6 +103,7 @@ def _generate_thread(state: HaijaState, prompt: str) -> None:
     finally:
         state.add_event({"type": "done"})
         state.busy = False
+        state.provider = None
 
 
 class HaijaHTTPServer(ThreadingHTTPServer):
@@ -334,6 +342,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "message": "a task is already running"})
             return
         s.busy = True
+        s.stop_requested = False
+        s.engine = None
         s.events.clear()
         s.worker_thread = threading.Thread(target=_generate_thread, args=(s, prompt), daemon=True)
         s.worker_thread.start()
@@ -365,6 +375,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "message": "a task is already running"})
             return
         s.busy = True
+        s.stop_requested = False
+        s.engine = None
         s.events.clear()
         s.worker_thread = threading.Thread(target=_run_thread, args=(s,), daemon=True)
         s.worker_thread.start()
@@ -372,11 +384,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_stop(self, body: dict) -> None:
         s = self.state
-        if not s.engine:
+        if not s.busy:
             self._send_json({"ok": False, "message": "nothing to stop"})
             return
-        s.engine.stop()
-        self._send_json({"ok": True, "message": "stopping…"})
+        if s.stop_requested:
+            self._send_json({"ok": True, "message": "stop already requested"})
+            return
+        s.stop_requested = True
+        if s.engine:
+            s.engine.stop()
+        if s.provider:
+            s.provider.cancel()
+        self._send_json({"ok": True, "message": "stop requested"})
 
     def _api_export(self, body: dict) -> None:
         s = self.state

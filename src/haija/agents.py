@@ -116,7 +116,12 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
     tools = all_tools(framework)
 
     for _ in range(engine.max_steps_per_turn):
+        if engine.stopped:
+            return {"content": "(stopped)"}
         resp = provider.chat(messages, tools=tools, reasoning=reasoning_param(agent.thinking))
+
+        if engine.stopped:
+            return {"content": "(stopped)"}
 
         engine.record(
             {
@@ -144,6 +149,8 @@ def run_agent(provider: ChatProvider, agent: AgentSpec, engine, cfg) -> dict[str
             return {"content": resp.content or "(no response)"}
 
         for tc in resp.tool_calls:
+            if engine.stopped:
+                return {"content": "(stopped)"}
             try:
                 result = engine.dispatch_tool(tc.name, tc.arguments, agent.name)
             except Exception as e:  # noqa: BLE001

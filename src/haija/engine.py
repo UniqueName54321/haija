@@ -474,7 +474,7 @@ def run_game(
                 continue
             obs({"type": "turn_start", "turn": engine.turn, "agent": name})
             run_agent(provider, agent, engine, cfg)
-            if engine.outcome:
+            if engine.outcome or engine.stopped:
                 break
 
     obs(

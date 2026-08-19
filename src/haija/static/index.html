@@ -405,6 +405,7 @@ function startPolling() {
   polling = true;
   $('btn-run').style.display = 'none';
   $('btn-stop').style.display = '';
+  $('btn-stop').disabled = false;
   poll();
 }
 function poll() {
@@ -434,6 +435,7 @@ function poll() {
 function stopPolling() {
   polling = false;
   $('btn-stop').style.display = 'none';
+  $('btn-stop').disabled = false;
   $('btn-run').style.display = '';
 }
 
@@ -477,7 +479,11 @@ async function doRun() {
 }
 async function doStop() {
   const r = await api('/api/stop', 'POST');
-  if (r.ok) logLine('[stop] stopping…', 'dim');
+  if (r.ok) {
+    logLine(`[stop] ${r.message}`, 'dim');
+    $('btn-stop').disabled = true;
+    setStatus('Stopping…', true);
+  }
 }
 async function doExport() {
   const r = await api('/api/export', 'POST');

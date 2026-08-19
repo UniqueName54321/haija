@@ -10,6 +10,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+import threading
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,6 +59,23 @@ class ChatProvider:
     def __init__(self, config: ModelConfig):
         self.config = config
         self.api_key = config.resolve_key()
+        self._cancelled = threading.Event()
+        self._response: Any = None
+        self._response_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        """Cancel this provider and close any in-flight HTTP response."""
+        self._cancelled.set()
+        with self._response_lock:
+            if self._response is not None:
+                try:
+                    self._response.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise ProviderError("Stopped by user.")
 
     def _url(self) -> str:
         base = self.config.base_url.rstrip("/")
@@ -80,6 +98,7 @@ class ChatProvider:
         json_mode: bool = False,
         reasoning: dict[str, Any] | None = None,
     ) -> ChatResponse:
+        self._check_cancelled()
         if not self.api_key:
             raise ProviderError(
                 f"No API key found. Set the {self.config.api_key_env} environment "
@@ -102,7 +121,11 @@ class ChatProvider:
         )
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                with self._response_lock:
+                    self._response = resp
+                raw = resp.read()
+                self._check_cancelled()
+                body = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
             LOG.error("API error %d: %s", e.code, detail[:200])
@@ -110,6 +133,10 @@ class ChatProvider:
         except urllib.error.URLError as e:
             LOG.error("Network error: %s", e.reason)
             raise ProviderError(f"Network error: {e.reason}") from e
+
+        finally:
+            with self._response_lock:
+                self._response = None
 
         try:
             message = body["choices"][0]["message"]
@@ -150,6 +177,7 @@ class ChatProvider:
         reasoning: dict[str, Any] | None = None,
     ) -> Generator[str, None, None]:
         """Stream chat completion over SSE. Yields content chunks."""
+        self._check_cancelled()
         if not self.api_key:
             raise ProviderError(
                 f"No API key found. Set the {self.config.api_key_env} "
@@ -177,6 +205,8 @@ class ChatProvider:
         )
         try:
             resp = urllib.request.urlopen(req, timeout=180)
+            with self._response_lock:
+                self._response = resp
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
             LOG.error("API stream error %d: %s", e.code, detail[:200])
@@ -185,18 +215,24 @@ class ChatProvider:
             LOG.error("Network error (stream): %s", e.reason)
             raise ProviderError(f"Network error: {e.reason}") from e
 
-        for line in resp:
-            line = line.decode("utf-8").strip()
-            if not line or not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
-            content = delta.get("content", "")
-            if content:
-                yield content
+        try:
+            for line in resp:
+                self._check_cancelled()
+                line = line.decode("utf-8").strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    yield content
+        finally:
+            with self._response_lock:
+                self._response = None
+            resp.close()

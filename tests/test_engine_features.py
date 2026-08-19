@@ -167,3 +167,37 @@ def test_generate_framework_observer():
     done_ev = [e for e in events if e["type"] == "generate_done"]
     assert len(done_ev) == 1
     assert "framework" in done_ev[0]
+
+
+def test_generation_prompt_requires_playable_initial_state():
+    from haija.generate import generate_framework
+
+    class FakeProvider:
+        def chat(self, messages, **kwargs):
+            self.messages = messages
+            from haija.provider import ChatResponse
+            return ChatResponse(content='{"initial_state":{"phase":"playing"},"actions":[]}')
+
+    provider = FakeProvider()
+    generate_framework(provider, "make a card game", name="Cards")
+    system = provider.messages[0]["content"]
+    assert "immediately playable on turn 1" in system
+    assert "Never emit an" in system
+    assert "unresolved setup/loading/dealing phase" in system
+
+
+def test_run_agent_stops_before_calling_provider():
+    from haija.agents import run_agent
+    from haija.config import AgentSpec, ProjectConfig
+
+    class NeverCalledProvider:
+        def chat(self, *args, **kwargs):
+            raise AssertionError("provider should not be called after stop")
+
+    e = _engine({"name": "G", "initial_state": {}, "actions": []})
+    e.stop()
+    cfg = ProjectConfig.load(
+        Path(__file__).parent.parent / "examples" / "tic-tac-toe" / "haija.toml"
+    )
+    result = run_agent(NeverCalledProvider(), AgentSpec(name="Alpha"), e, cfg)
+    assert result == {"content": "(stopped)"}
