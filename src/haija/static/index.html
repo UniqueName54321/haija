@@ -147,6 +147,12 @@
   .arch-list label:hover { background: var(--panel-2); border-radius: 5px; }
   .arch-list .pers { color: var(--muted); font-size: 12px; }
   .modal .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .tabs { display: flex; gap: 1px; margin-bottom: 14px; background: var(--border); border-radius: 7px; overflow: hidden; }
+  .tab-btn { background: var(--bg); border: none; color: var(--muted); border-radius: 0; padding: 6px 18px; font-size: 12px; cursor: pointer; transition: background .15s; }
+  .tab-btn.active { background: var(--panel-2); color: var(--text); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .gen-stream { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 10px 14px; max-height: 200px; overflow-y: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; margin-bottom: 6px; }
 
   /* Per-agent thinking */
   .agent-think-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; }
@@ -227,29 +233,53 @@
 <div class="overlay hidden" id="opts-overlay">
   <div class="modal">
     <h2>Game options</h2>
-    <div class="row">
-      <label>Game tone (applied to all agents)</label>
-      <input type="text" id="opt-tone" placeholder="e.g. whimsical and cutthroat" />
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="game">Game</button>
+      <button class="tab-btn" data-tab="model">Model</button>
+      <button class="tab-btn" data-tab="general">General</button>
     </div>
-    <div class="row">
-      <label>Thinking depth per agent (off / low / medium / high)</label>
-      <div id="opt-agents"></div>
+    <div class="tab-panel active" id="tab-game">
+      <div class="row">
+        <label>Game tone (applied to all agents)</label>
+        <input type="text" id="opt-tone" placeholder="e.g. whimsical and cutthroat" />
+      </div>
+      <div class="row">
+        <label>Thinking depth per agent (off / low / medium / high)</label>
+        <div id="opt-agents"></div>
+      </div>
+      <div class="row">
+        <label>Archetypes (check = add as an agent)</label>
+        <div class="arch-list" id="opt-archs"></div>
+      </div>
     </div>
-    <div class="row">
-      <label>Archetypes (check = add as an agent)</label>
-      <div class="arch-list" id="opt-archs"></div>
+    <div class="tab-panel" id="tab-model">
+      <div class="row">
+        <label>Model (default provider is OpenRouter)</label>
+        <input type="text" id="opt-model" placeholder="model id" />
+      </div>
+      <div class="row">
+        <label>Base URL</label>
+        <input type="text" id="opt-base-url" placeholder="https://openrouter.ai/api/v1" />
+      </div>
+      <div class="row">
+        <label>API key env var</label>
+        <input type="text" id="opt-api-key-env" placeholder="OPENROUTER_API_KEY" />
+      </div>
     </div>
-    <div class="row">
-      <label>Model (default provider is OpenRouter)</label>
-      <input type="text" id="opt-model" placeholder="model id" />
-    </div>
-    <div class="row">
-      <label>Base URL</label>
-      <input type="text" id="opt-base-url" placeholder="https://openrouter.ai/api/v1" />
-    </div>
-    <div class="row">
-      <label>API key env var</label>
-      <input type="text" id="opt-api-key-env" placeholder="OPENROUTER_API_KEY" />
+    <div class="tab-panel" id="tab-general">
+      <div class="row">
+        <label>Log level</label>
+        <select id="opt-log-level">
+          <option value="debug">debug</option>
+          <option value="info" selected>info</option>
+          <option value="warning">warning</option>
+          <option value="error">error</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Log file (leave empty for default ~/.haija/haija.log)</label>
+        <input type="text" id="opt-log-file" placeholder="e.g. /path/to/haija.log" />
+      </div>
     </div>
     <div class="footer">
       <button id="opt-cancel">Cancel</button>
@@ -336,6 +366,9 @@ function formatEvent(ev) {
   }
   if (t === 'info') return ev.message;
   if (t === 'error') return `[error] ${ev.message}`;
+  if (t === 'generate_start') return `[generate] Generating framework…`;
+  if (t === 'generate_stream') return '';
+  if (t === 'generate_done') return `[generate] Framework ready — ${(ev.framework && ev.framework.actions && ev.framework.actions.length) || 0} action(s).`;
   if (t === 'done') return '';
   return JSON.stringify(ev);
 }
@@ -377,6 +410,17 @@ function poll() {
     (data.events || []).forEach(ev => {
       const text = formatEvent(ev);
       if (text) logLine(text, eventClass(ev));
+      // Live streaming preview for framework generation
+      if (ev.type === 'generate_stream' && ev.full) {
+        let gs = $('gen-stream');
+        if (!gs) { gs = document.createElement('div'); gs.id = 'gen-stream'; gs.className = 'gen-stream'; $('log').appendChild(gs); }
+        gs.textContent = ev.full;
+        gs.scrollTop = gs.scrollHeight;
+      }
+      if (ev.type === 'generate_done' || ev.type === 'done') {
+        const gs = $('gen-stream');
+        if (gs) gs.remove();
+      }
       if (ev.type === 'done') { stopPolling(); setStatus('Done'); }
       if (ev.type === 'error') stopPolling();
     });
@@ -435,6 +479,8 @@ async function openOptions() {
   $('opt-model').value = s.model_model || '';
   $('opt-base-url').value = s.model_base_url || '';
   $('opt-api-key-env').value = s.model_api_key_env || '';
+  $('opt-log-level').value = s.log_level || 'info';
+  $('opt-log-file').value = s.log_file || '';
   const list = $('opt-archs');
   list.innerHTML = '';
   (s.archetypes || []).forEach(a => {
@@ -481,6 +527,8 @@ async function saveOptions() {
     api_key_env: $('opt-api-key-env').value,
     enabled_archetypes: enabled,
     agent_thinking: agentThinking,
+    log_level: $('opt-log-level').value,
+    log_file: $('opt-log-file').value,
   });
   closeOptions();
   logLine(r.message, r.ok ? '' : 'outcome');
@@ -615,6 +663,16 @@ $('btn-clear').onclick = clearLog;
 $('opt-cancel').onclick = closeOptions;
 $('opt-save').onclick = saveOptions;
 $('opts-overlay').addEventListener('click', (e) => { if (e.target === $('opts-overlay')) closeOptions(); });
+// Options tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = document.getElementById('tab-' + btn.dataset.tab);
+    if (tab) tab.classList.add('active');
+  });
+});
 $('btn-replay').onclick = doReplay;
 $('replay-close').onclick = closeReplay;
 $('rp-prev').onclick = () => { if (replayIndex > 0) { replayIndex--; renderReplayTurn(); } };

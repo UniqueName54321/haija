@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from haija.engine import Engine
 from haija.framework import Framework
@@ -94,3 +95,47 @@ def test_alliances():
     e.dispatch_tool("break_alliance", {"with_agent": "B"}, "A")
     assert e.alliances == set()
     assert json.loads(e.dispatch_tool("my_allies", {}, "A")) == []
+
+
+def test_general_config_roundtrip():
+    from haija.config import ProjectConfig, dump_config
+    from io import StringIO
+    import tomllib
+
+    cfg = ProjectConfig.load(
+        Path(__file__).parent.parent / "examples" / "tic-tac-toe" / "haija.toml"
+    )
+    cfg.general.log_level = "debug"
+    cfg.general.log_file = "/tmp/test.log"
+    toml_text = dump_config(cfg)
+    data = tomllib.loads(toml_text)
+    assert data.get("general", {}).get("log_level") == "debug"
+    assert data.get("general", {}).get("log_file") == "/tmp/test.log"
+
+
+def test_generate_framework_observer():
+    from haija.framework import assemble_framework
+    from haija.generate import generate_framework
+
+    # We can't call the real API, but we can test that observer is called
+    # by passing a mock-like provider that raises an error after streaming
+    class FakeProvider:
+        def chat_stream(self, messages, tools=None, reasoning=None):
+            yield "{"
+            yield '"description"'
+            yield ': "test"'
+            yield "}"
+
+    events = []
+    try:
+        generate_framework(FakeProvider(), "test", name="T", observer=events.append)
+    except Exception:
+        pass
+    types = [e["type"] for e in events]
+    assert "generate_start" in types
+    assert "generate_stream" in types
+    assert "generate_done" in types
+    # The last event should have a framework
+    done_ev = [e for e in events if e["type"] == "generate_done"]
+    assert len(done_ev) == 1
+    assert "framework" in done_ev[0]

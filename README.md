@@ -22,6 +22,8 @@ calls.
 - ⚖️ **Deterministic judge** — the engine checks win/lose/draw conditions itself (no trusting agent-declared outcomes).
 - 🛡️ **Rule guards** — actions can declare preconditions; illegal moves are rejected by the engine.
 - 🕵️ **Hidden info & memory** — per-agent private memory, plus alliances between agents.
+- 📝 **Logging** — configurable log level and file (debug/info/warning/error) via the Options menu or CLI.
+- ⚡ **Streaming generation** — framework generation streams progress live in the CLI and GUI.
 
 ## How it works
 
@@ -189,6 +191,31 @@ tools — the engine is authoritative.
 Guard ops: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `exists`,
 `not_exists` (wrap one in `{"not": ...}` to negate). Paths and values use the
 same `{{...}}` templates as effects.
+
+### Logging
+
+Haija uses Python's stdlib `logging` module. The log level and file path are
+set in the `[general]` section of `haija.toml` (defaults: `info`, written to
+`~/.haija/haija.log`). Both the CLI and GUI log every API call, guard
+rejection, and framework generation.
+
+```toml
+[general]
+log_level = "debug"   # debug | info | warning | error
+log_file = "/path/to/haija.log"
+```
+
+Set them from the GUI's **Options → General** tab, or from the CLI:
+
+```sh
+haija options --log-level debug --log-file ./debug.log
+```
+
+### Streaming generation
+
+`haija generate` and the GUI's **Generate** button both stream the model's
+output in real time. The CLI shows progress dots; the GUI shows a live
+preview of the framework as it's being written.
 
 ## Agent config
 

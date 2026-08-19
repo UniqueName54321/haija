@@ -55,10 +55,19 @@ class ModelConfig:
 
 
 @dataclass
+class GeneralConfig:
+    """General Haija settings (logging, etc)."""
+
+    log_level: str = "info"
+    log_file: str = ""
+
+
+@dataclass
 class ProjectConfig:
     name: str
     agents: list[AgentSpec]
     model: ModelConfig
+    general: GeneralConfig = field(default_factory=GeneralConfig)
     tone: str = ""
     archetypes: dict[str, Archetype] = field(default_factory=dict)  # custom only
     framework_path: str = "framework.json"
@@ -168,6 +177,7 @@ class ProjectConfig:
             name=data.get("name", path.parent.name),
             agents=agents,
             model=model,
+            general=_parse_general(data.get("general", {})),
             tone=data.get("tone", ""),
             archetypes=archetypes,
             framework_path=data.get("framework_path", "framework.json"),
@@ -183,6 +193,13 @@ def _thinking(value: Any) -> str | None:
         return None
     v = str(value).strip().lower()
     return v if v in THINKING_LEVELS else None
+
+
+def _parse_general(raw: dict[str, Any]) -> GeneralConfig:
+    return GeneralConfig(
+        log_level=str(raw.get("log_level", "info")).strip().lower() or "info",
+        log_file=str(raw.get("log_file", "")).strip(),
+    )
 
 
 def _tstr(s: str) -> str:
@@ -215,6 +232,10 @@ def dump_config(cfg: ProjectConfig) -> str:
     L.append(f"max_steps_per_turn = {cfg.max_steps_per_turn}")
     L.append(f"framework_path = {_tstr(cfg.framework_path)}")
     L.append(f"state_path = {_tstr(cfg.state_path)}")
+    L.append("")
+    L.append("[general]")
+    L.append(f"log_level = {_tstr(cfg.general.log_level)}")
+    L.append(f"log_file = {_tstr(cfg.general.log_file)}")
     L.append("")
 
     for a in cfg.agents:
@@ -258,6 +279,10 @@ name = "{name}"
 max_steps_per_turn = 16
 framework_path = "framework.json"
 state_path = "state.json"
+
+[general]
+log_level = "info"
+# log_file = "/path/to/haija.log"    # default: ~/.haija/haija.log
 
 # The agents that will play this game. Each can use a built-in archetype
 # (or a custom one from [[archetypes]] below), plus an optional description.

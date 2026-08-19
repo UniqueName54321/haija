@@ -183,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 "project": s.cfg.name,
                 "dir": str(s.project_dir),
                 "tone": s.cfg.tone,
+                "log_level": s.cfg.general.log_level,
+                "log_file": s.cfg.general.log_file,
                 "model_provider": s.cfg.model.provider,
                 "model_model": s.cfg.model.model,
                 "model_base_url": s.cfg.model.base_url,
@@ -404,6 +406,10 @@ class Handler(BaseHTTPRequestHandler):
             for name, level in body["agent_thinking"].items():
                 lvl = str(level or "").strip().lower()
                 cfg.set_agent_thinking(name, None if lvl in ("", "default") else lvl)
+        if body.get("log_level"):
+            cfg.general.log_level = body["log_level"].strip().lower()
+        if "log_file" in body:
+            cfg.general.log_file = (body["log_file"] or "").strip()
         try:
             cfg.save(s.toml_path)
         except Exception as e:  # noqa: BLE001
@@ -413,11 +419,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    setup_logging()
     host = "127.0.0.1"
     port = int(os.environ.get("HAIJA_PORT", DEFAULT_PORT))
     server = HaijaHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"Haija GUI running at {url}")
+    LOG.info("GUI server starting at %s", url)
     print("Press Ctrl+C to stop.")
     try:
         webbrowser.open(url)

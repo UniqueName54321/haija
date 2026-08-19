@@ -7,12 +7,16 @@ OpenAI-compatible endpoint can be used by setting ``model.base_url``.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import ModelConfig
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -101,8 +105,10 @@ class ChatProvider:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
+            LOG.error("API error %d: %s", e.code, detail[:200])
             raise ProviderError(f"API error {e.code}: {detail}") from e
         except urllib.error.URLError as e:
+            LOG.error("Network error: %s", e.reason)
             raise ProviderError(f"Network error: {e.reason}") from e
 
         try:
@@ -136,3 +142,61 @@ class ChatProvider:
                 ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=args)
             )
         return ChatResponse(content=content, tool_calls=tool_calls, reasoning=reasoning)
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        reasoning: dict[str, Any] | None = None,
+    ) -> Generator[str, None, None]:
+        """Stream chat completion over SSE. Yields content chunks."""
+        if not self.api_key:
+            raise ProviderError(
+                f"No API key found. Set the {self.config.api_key_env} "
+                "environment variable (or model.api_key in haija.toml)."
+            )
+
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+        if reasoning:
+            payload["reasoning"] = reasoning
+
+        headers = self._headers()
+        headers["Accept-Encoding"] = "identity"
+
+        req = urllib.request.Request(
+            self._url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            LOG.error("API stream error %d: %s", e.code, detail[:200])
+            raise ProviderError(f"API error {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            LOG.error("Network error (stream): %s", e.reason)
+            raise ProviderError(f"Network error: {e.reason}") from e
+
+        for line in resp:
+            line = line.decode("utf-8").strip()
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                yield content

@@ -12,6 +12,7 @@ from .config import ProjectConfig
 from .engine import Engine, render_export, run_game
 from .framework import load_framework
 from .generate import generate_framework
+from .logging_setup import setup_logging
 from .project import new_project, projects_root
 from .provider import ChatProvider, ProviderError
 
@@ -38,8 +39,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
     toml = _resolve_project(args.project)
     cfg = ProjectConfig.load(toml)
     provider = ChatProvider(cfg.model)
+
+    def _observer(ev):
+        if ev["type"] == "generate_start":
+            print(f"Generating framework for '{cfg.name}'…", file=sys.stderr)
+            print("  ", end="", flush=True)
+        elif ev["type"] == "generate_stream":
+            if args.no_stream:
+                return
+            # Print a dot per ~80 chars to show progress
+            print(".", end="", flush=True)
+        elif ev["type"] == "generate_done":
+            print(" done.", file=sys.stderr)
+
     try:
-        fw = generate_framework(provider, args.prompt, name=cfg.name)
+        fw = generate_framework(provider, args.prompt, name=cfg.name, observer=_observer)
     except ProviderError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -168,6 +182,7 @@ def _print_options(cfg: ProjectConfig) -> None:
         f"Runtime:   framework={cfg.framework_path} state={cfg.state_path} "
         f"max_steps_per_turn={cfg.max_steps_per_turn}"
     )
+    print(f"Logging:   level={cfg.general.log_level} file={cfg.general.log_file or '~/.haija/haija.log'}")
     print(f"\nAgents ({len(cfg.agents)}):")
     for a in cfg.agents:
         arch = f" ({a.archetype})" if a.archetype else ""
@@ -229,6 +244,12 @@ def cmd_options(args: argparse.Namespace) -> int:
             level = level.strip().lower()
             cfg.set_agent_thinking(name, None if level in ("", "default") else level)
         changed = True
+    if args.log_level:
+        cfg.general.log_level = args.log_level.strip().lower()
+        changed = True
+    if args.log_file:
+        cfg.general.log_file = args.log_file.strip()
+        changed = True
 
     if changed:
         cfg.save()
@@ -238,6 +259,9 @@ def cmd_options(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Setup logging early — defaults to info, overridden by project config later.
+    setup_logging()
+
     p = argparse.ArgumentParser(
         prog="haija",
         description="Haija — an AI game engine where the agents are the game.",
@@ -253,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     g = sub.add_parser("generate", help="generate a framework from a prompt")
     g.add_argument("prompt")
     g.add_argument("--project", default=".", help="project directory or haija.toml path")
+    g.add_argument("--no-stream", action="store_true", help="don't show progress dots")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="run the game")
@@ -288,6 +313,8 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--provider", default=None, help="set the provider name")
     o.add_argument("--api-key-env", default=None, help="set the API key env var")
     o.add_argument("--agent-thinking", default=None, metavar="NAME=LEVEL[,...]", help="set per-agent thinking (off|low|medium|high|default), comma-separated")
+    o.add_argument("--log-level", default=None, choices=["debug", "info", "warning", "error"], help="set log level")
+    o.add_argument("--log-file", default=None, metavar="PATH", help="set log file path")
     o.set_defaults(func=cmd_options)
 
     args = p.parse_args(argv)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,8 @@ from .config import ProjectConfig
 from .framework import Action, Framework
 from .guards import evaluate_guards
 from .templating import resolve_path, resolve_value
+
+LOG = logging.getLogger(__name__)
 
 Observer = Callable[[dict[str, Any]], None]
 
@@ -125,6 +128,7 @@ class Engine:
         if action.guard:
             passed, reason = evaluate_guards(action.guard, ctx)
             if not passed:
+                LOG.warning("guard rejected %s.%s(%s): %s", actor, action.name, params, reason)
                 return {"ok": False, "error": f"illegal move: {reason}"}
         results = []
         for eff in action.effects:
