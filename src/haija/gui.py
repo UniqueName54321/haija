@@ -11,6 +11,7 @@ No Tkinter, no platform-specific quirks — just Python + a browser.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import webbrowser
@@ -24,8 +25,11 @@ from .config import ProjectConfig
 from .engine import Engine, run_game
 from .framework import load_framework
 from .generate import generate_framework
+from .logging_setup import setup_logging
 from .project import new_project, projects_root
 from .provider import ChatProvider, ProviderError
+
+LOG = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8657
 
