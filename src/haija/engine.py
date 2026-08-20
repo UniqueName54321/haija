@@ -64,6 +64,9 @@ class Engine:
     winner: str | None = None
     stopped: bool = False
     _advanced_this_turn: bool = field(default=False, init=False, repr=False)
+    _turn_resources: dict[str, dict[str, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _rng: random.Random = field(init=False, repr=False)
 
     def stop(self) -> None:
@@ -90,6 +93,32 @@ class Engine:
             self.state["top_card"] = copy.deepcopy(discard[0]) if discard else None
         if self.agents and "turn_index" in self.state:
             self.state["turn_index"] = int(self.state.get("turn_index", 0)) % len(self.agents)
+
+    def begin_turn(self, actor: str) -> None:
+        """Refresh the named action resources available to one actor."""
+        self._turn_resources[actor] = copy.deepcopy(self.framework.turn.action_limits)
+
+    def _turn_cost_error(self, action: Action, actor: str) -> str | None:
+        if not action.turn_cost:
+            return None
+        resources = self._turn_resources.setdefault(
+            actor, copy.deepcopy(self.framework.turn.action_limits)
+        )
+        for name, cost in action.turn_cost.items():
+            remaining = int(resources.get(name, 0))
+            if remaining < cost:
+                return (
+                    f"turn resource '{name}' exhausted "
+                    f"(needs {cost}, {remaining} remaining)"
+                )
+        return None
+
+    def _consume_turn_cost(self, action: Action, actor: str) -> None:
+        resources = self._turn_resources.setdefault(
+            actor, copy.deepcopy(self.framework.turn.action_limits)
+        )
+        for name, cost in action.turn_cost.items():
+            resources[name] = int(resources.get(name, 0)) - cost
 
     def _resolve_setup_state(self) -> None:
         """Turn conventional generated card-game setup into a playable state.
@@ -235,7 +264,13 @@ class Engine:
         """Return full state internally, or a private-safe view for an agent."""
         view = copy.deepcopy(self.state)
         if viewer is None:
+            if self._turn_resources:
+                view["turn_resources"] = copy.deepcopy(self._turn_resources)
             return view
+        if self.framework.turn.action_limits:
+            view["turn_resources"] = copy.deepcopy(
+                self._turn_resources.get(viewer, self.framework.turn.action_limits)
+            )
         discard = self._discard_pile()
         if discard is not None:
             top = copy.deepcopy(discard[0]) if discard else None
@@ -329,6 +364,9 @@ class Engine:
         param_error = self._validate_params(action, params)
         if param_error:
             return {"ok": False, "error": f"invalid parameters: {param_error}"}
+        resource_error = self._turn_cost_error(action, actor)
+        if resource_error:
+            return {"ok": False, "error": f"illegal move: {resource_error}"}
         ctx = self._ctx(actor, params)
         played_card = self._selected_card(actor, params)
         if action.guard:
@@ -340,14 +378,19 @@ class Engine:
         ctx["before_state"] = snapshot
         ctx["_removed_paths"] = set()
         advanced_before = self._advanced_this_turn
+        resources_before = copy.deepcopy(self._turn_resources)
+        rng_before = self._rng.getstate()
         results = []
         try:
             for eff in action.effects:
                 results.append(self._apply_one(eff, ctx))
             self._resolve_conventional_card_effects(action, actor, params, played_card)
+            self._consume_turn_cost(action, actor)
         except Exception as exc:  # action effects are an atomic transaction
             self.state = snapshot
             self._advanced_this_turn = advanced_before
+            self._turn_resources = resources_before
+            self._rng.setstate(rng_before)
             LOG.warning("action failed %s.%s(%s): %s", actor, action.name, params, exc)
             return {"ok": False, "error": f"action failed: {exc}"}
         self.history.append(
@@ -363,7 +406,12 @@ class Engine:
         touched_hand = any(str(e.get("path", "")).startswith("hands.") for e in action.effects)
         if touched_hand:
             self._check_empty_hand_win(actor)
-        return {"ok": True, "effects": results, "state": self.public_state(actor)}
+        return {
+            "ok": True,
+            "effects": results,
+            "turn_resources": copy.deepcopy(self._turn_resources.get(actor, {})),
+            "state": self.public_state(actor),
+        }
 
     def _selected_card(self, actor: str, params: dict[str, Any]) -> Any:
         hands = self.state.get("hands")
@@ -522,6 +570,26 @@ class Engine:
             target = self._navigate(segs)
             self._rng.shuffle(target)
             return {"op": "shuffle", "path": path}
+        if op == "random_int":
+            low = int(resolve_value(eff.get("min"), ctx))
+            high = int(resolve_value(eff.get("max"), ctx))
+            if low > high:
+                raise ValueError("random_int min exceeds max")
+            rolled = self._rng.randint(low, high)
+            parent, key = self._parent_key(segs)
+            parent[key] = rolled
+            return {
+                "op": "random_int", "path": path, "min": low, "max": high,
+                "value": rolled,
+            }
+        if op == "random_choice":
+            choices = eff.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("random_choice requires a non-empty choices array")
+            selected = copy.deepcopy(self._rng.choice(choices))
+            parent, key = self._parent_key(segs)
+            parent[key] = selected
+            return {"op": "random_choice", "path": path, "value": selected}
         if op in ("draw", "move"):
             source_path = eff.get("from", "deck")
             count = int(resolve_value(eff.get("count", 1), ctx))
@@ -803,7 +871,7 @@ def render_export(
         L += [f"  - {w}" for w in win]
     if lose:
         L.append("\nLose conditions:")
-        L += [f"  - {l}" for l in lose]
+        L += [f"  - {condition}" for condition in lose]
 
     cur_turn: int | None = None
     for entry in run_log:
@@ -892,6 +960,7 @@ def run_game(
                 if fw.turn.order != "simultaneous":
                     engine.finish_turn()
                 continue
+            engine.begin_turn(name)
             obs({"type": "turn_start", "turn": engine.turn, "agent": name})
             run_agent(provider, agent, engine, cfg)
             if engine.outcome or engine.stopped:

@@ -16,6 +16,7 @@ what is actually true.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class Action:
     parameters: dict[str, Any] = field(default_factory=dict)
     effects: list[dict[str, Any]] = field(default_factory=list)
     guard: list[dict[str, Any]] = field(default_factory=list)  # preconditions (AND)
+    turn_cost: dict[str, int] = field(default_factory=dict)
 
     def to_tool(self) -> dict[str, Any]:
         params = self.parameters or {"type": "object", "properties": {}}
@@ -47,12 +49,14 @@ class Action:
 class TurnConfig:
     order: str = "round_robin"  # "round_robin" | "simultaneous"
     max_turns: int = 20
+    action_limits: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "TurnConfig":
         return cls(
             order=d.get("order", "round_robin"),
             max_turns=int(d.get("max_turns", 20)),
+            action_limits=_int_map(d.get("action_limits")),
         )
 
 
@@ -104,6 +108,7 @@ class Framework:
                 parameters=a.get("parameters", {"type": "object", "properties": {}}),
                 effects=list(a.get("effects", [])),
                 guard=_as_guard_list(a.get("guard")),
+                turn_cost=_int_map(a.get("turn_cost")),
             )
             for a in d.get("actions", [])
         ]
@@ -138,10 +143,15 @@ class Framework:
                     "parameters": a.parameters,
                     "effects": a.effects,
                     "guard": a.guard,
+                    "turn_cost": a.turn_cost,
                 }
                 for a in self.actions
             ],
-            "turn": {"order": self.turn.order, "max_turns": self.turn.max_turns},
+            "turn": {
+                "order": self.turn.order,
+                "max_turns": self.turn.max_turns,
+                "action_limits": self.turn.action_limits,
+            },
             "judge": self.judge.to_dict(),
         }
 
@@ -173,18 +183,25 @@ def framework_schema_instructions() -> str:
         "properties": { "x": { "type": "string", "description": "..." } },
         "required": ["x"]
       },
-      "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ]
+      "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ],
+      "turn_cost": { "standard_action": 1 }
     }
   ],
-  "turn": { "order": "round_robin", "max_turns": 20 }
+  "turn": { "order": "round_robin", "max_turns": 20,
+            "action_limits": { "standard_action": 1 } }
 }
 
 Effect rules:
-- "op" may be set, incr, append, remove, shuffle, draw/move, if,
+- "op" may be set, incr, append, remove, shuffle, random_int,
+  random_choice, draw/move, if,
   reverse_direction, skip_next, or advance_turn.
 - draw/move uses "from", "path", and optional "count". Example:
   {"op":"draw","from":"deck","path":"hands.{{next_actor}}","count":4}.
 - if uses "guard", "effects", and optional "else" effect lists.
+- random_int uses "path", inclusive integer "min" and "max".
+- random_choice uses "path" and a non-empty "choices" array.
+- `turn.action_limits` declares named resources refreshed for each player turn.
+  `action.turn_cost` consumes those resources only after a successful action.
 - "path" is a dot-separated path into the state, e.g. "board.0" or
   "players.Alice.hp". List indices are integers.
 - Path segments and values may contain templates: {{actor}} (the acting agent's
@@ -223,10 +240,12 @@ Return ONLY a JSON object with these fields (no markdown fences, no commentary):
         "required": ["x"]
       },
       "effects": [ { "op": "set", "path": "dot.path.to.state.key", "value": "..." } ],
+      "turn_cost": { "standard_action": 1 },
       "guard": [ { "op": "not_exists", "path": "board.{{params.cell}}" } ]
     }
   ],
-  "turn": { "order": "round_robin", "max_turns": 20 },
+  "turn": { "order": "round_robin", "max_turns": 20,
+            "action_limits": { "standard_action": 1 } },
   "judge": {
     "win":  [ { "op": "eq", "path": "winner", "value": "{{actor}}" } ],
     "lose": [],
@@ -235,10 +254,21 @@ Return ONLY a JSON object with these fields (no markdown fences, no commentary):
 }
 
 Effect rules:
-- Effect ops: set, incr, append, remove, shuffle, draw, move, if,
+- Effect ops: set, incr, append, remove, shuffle, random_int, random_choice,
+  draw, move, if,
   reverse_direction, skip_next, advance_turn.
 - draw/move: {"op":"draw","from":"deck","path":"hands.{{next_actor}}","count":4}.
 - if: {"op":"if","guard":[...],"effects":[...],"else":[...]}.
+- Random integer: {"op":"random_int","path":"die","min":1,"max":6}.
+  Bounds are inclusive. Never fake randomness by setting an empty value.
+- Random selection: {"op":"random_choice","path":"weather","choices":["sun","rain"]}.
+- If rules allow only one of several actions per turn, declare a shared limit,
+  e.g. `turn.action_limits: {"standard_action":1}`, and give every mutually
+  exclusive action `turn_cost: {"standard_action":1}`. Card play actions and
+  Nomic roll/propose actions must consume a standard action. Put all consequences
+  of one action (rolling, scoring, recording the result) in that action's effects.
+- Every stated result and score threshold must be reachable. A d6 produces only
+  1 through 6; do not create conditions for 8 or 12 unless rolling multiple dice.
 - Use reverse_direction, skip_next, and draw effects for action cards; prose
   rules alone do not mutate state. The engine advances ordinary turns.
 - For UNO, set `deck_type` to `"uno"`; Haija constructs/shuffles the standard
@@ -303,6 +333,20 @@ def _as_guard_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _int_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, amount in value.items():
+        try:
+            parsed = int(amount)
+        except (TypeError, ValueError):
+            continue
+        if str(key).strip():
+            result[str(key).strip()] = parsed
+    return result
+
+
 def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
     """Coerce an AI-authored game-design object into a well-formed framework
     body, filling deterministic defaults for anything missing or malformed."""
@@ -327,6 +371,7 @@ def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
                 "parameters": params,
                 "effects": [e for e in effects if isinstance(e, dict)],
                 "guard": _as_guard_list(a.get("guard")),
+                "turn_cost": _int_map(a.get("turn_cost")),
             }
         )
 
@@ -349,7 +394,11 @@ def normalize_content(content: dict[str, Any] | None) -> dict[str, Any]:
         "lose_conditions": _as_str_list(content.get("lose_conditions")),
         "initial_state": _as_dict(content.get("initial_state")),
         "actions": actions,
-        "turn": {"order": order, "max_turns": max_turns},
+        "turn": {
+            "order": order,
+            "max_turns": max_turns,
+            "action_limits": _int_map(turn.get("action_limits")),
+        },
         "judge": Judge.from_dict(content.get("judge")).to_dict(),
     }
 
@@ -373,8 +422,9 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     allowed = {
-        "set", "incr", "append", "remove", "shuffle", "draw", "move", "if",
-        "reverse_direction", "skip_next", "advance_turn",
+        "set", "incr", "append", "remove", "shuffle", "random_int",
+        "random_choice", "draw", "move", "if", "reverse_direction",
+        "skip_next", "advance_turn",
     }
     names: set[str] = set()
     guard_ops = {
@@ -382,6 +432,26 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
         "not_contains", "exists", "not_exists", "length_eq", "length_gt",
         "length_gte", "length_lt", "length_lte",
     }
+    random_ranges: dict[str, tuple[int, int]] = {}
+
+    def initial_value(path: str) -> Any:
+        if not path or "{{" in path:
+            return None
+        current: Any = framework.initial_state
+        try:
+            for segment in path.split("."):
+                current = current[int(segment)] if isinstance(current, list) else current[segment]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        return current
+
+    def effect_ops(effects: list[dict[str, Any]]) -> set[str]:
+        result: set[str] = set()
+        for effect in effects:
+            result.add(str(effect.get("op", "set")))
+            result.update(effect_ops(effect.get("effects", [])))
+            result.update(effect_ops(effect.get("else", [])))
+        return result
 
     def check_guard(guard: dict[str, Any], location: str) -> None:
         for group in ("all", "any"):
@@ -404,10 +474,39 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
         op = effect.get("op", "set")
         if op not in allowed:
             errors.append(f"action '{action_name}' uses unknown effect op '{op}'")
-        if op in ("set", "incr", "append", "remove", "shuffle", "draw", "move") and not effect.get("path"):
+        if op in (
+            "set", "incr", "append", "remove", "shuffle", "random_int",
+            "random_choice", "draw", "move",
+        ) and not effect.get("path"):
             errors.append(f"action '{action_name}' effect '{op}' requires a path")
         if op in ("draw", "move") and not effect.get("from"):
             errors.append(f"action '{action_name}' effect '{op}' requires a from path")
+        if op == "random_int":
+            low, high = effect.get("min"), effect.get("max")
+            if (
+                isinstance(low, bool) or isinstance(high, bool)
+                or not isinstance(low, int) or not isinstance(high, int)
+            ):
+                errors.append(
+                    f"action '{action_name}' random_int requires integer min and max"
+                )
+            elif low > high:
+                errors.append(f"action '{action_name}' random_int min exceeds max")
+            elif effect.get("path"):
+                random_ranges[str(effect["path"])] = (low, high)
+        if op == "random_choice" and not (
+            isinstance(effect.get("choices"), list) and effect["choices"]
+        ):
+            errors.append(
+                f"action '{action_name}' random_choice requires a non-empty choices array"
+            )
+        if op == "set" and effect.get("value") == "":
+            existing = initial_value(str(effect.get("path", "")))
+            if isinstance(existing, (int, float)) and not isinstance(existing, bool):
+                errors.append(
+                    f"action '{action_name}' sets numeric state "
+                    f"'{effect.get('path')}' to an empty string"
+                )
         if op == "if":
             if not effect.get("guard"):
                 errors.append(f"action '{action_name}' conditional effect requires a guard")
@@ -428,6 +527,29 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
         names.add(action.name)
         if not action.effects and not action.name.lower().startswith(("say_", "pass", "end_")):
             warnings.append(f"action '{action.name}' has no effects")
+        lower_name = action.name.lower()
+        name_tokens = set(lower_name.replace("-", "_").split("_"))
+        if name_tokens.intersection({"roll", "dice", "die"}) and not (
+            effect_ops(action.effects) & {"random_int", "random_choice"}
+        ):
+            errors.append(
+                f"action '{action.name}' describes a roll but has no random effect"
+            )
+        for resource, cost in action.turn_cost.items():
+            if cost <= 0:
+                errors.append(
+                    f"action '{action.name}' turn cost '{resource}' must be positive"
+                )
+                continue
+            limit = framework.turn.action_limits.get(resource)
+            if limit is None:
+                errors.append(
+                    f"action '{action.name}' consumes undeclared turn resource '{resource}'"
+                )
+            elif cost > limit:
+                errors.append(
+                    f"action '{action.name}' costs {cost} '{resource}' but turn limit is {limit}"
+                )
         for guard in action.guard:
             check_guard(guard, f"action '{action.name}'")
         for effect in action.effects:
@@ -441,9 +563,88 @@ def validate_framework(framework: Framework) -> tuple[list[str], list[str]]:
             errors.append("setup phase requires hands plus a deck/draw_pile")
     if framework.turn.max_turns <= 0:
         errors.append("turn.max_turns must be positive")
+    for resource, limit in framework.turn.action_limits.items():
+        if limit <= 0:
+            errors.append(f"turn action limit '{resource}' must be positive")
+
+    # Rules that explicitly make generated actions mutually exclusive need a
+    # shared finite resource; prose alone cannot enforce that restriction.
+    for rule in framework.rules:
+        lower_rule = rule.lower()
+        if "either" not in lower_rule or " or " not in lower_rule:
+            continue
+        mentioned = [
+            action for action in framework.actions
+            if action.name.lower().split("_")[0] in lower_rule
+        ]
+        if len(mentioned) < 2:
+            continue
+        shared = set(mentioned[0].turn_cost)
+        for action in mentioned[1:]:
+            shared.intersection_update(action.turn_cost)
+        shared.intersection_update(framework.turn.action_limits)
+        if not shared:
+            errors.append(
+                "mutually exclusive actions named in rule require a shared turn_cost resource"
+            )
+            break
+
+    def check_reachable_guard(guard: dict[str, Any], location: str) -> None:
+        for group in ("all", "any"):
+            for child in guard.get(group, []):
+                if isinstance(child, dict):
+                    check_reachable_guard(child, location)
+        if isinstance(guard.get("not"), dict):
+            check_reachable_guard(guard["not"], location)
+        path = str(guard.get("path", ""))
+        value = guard.get("value")
+        if guard.get("op", "eq") == "eq" and path in random_ranges:
+            low, high = random_ranges[path]
+            if isinstance(value, (int, float)) and not low <= value <= high:
+                errors.append(
+                    f"{location} requires {path}={value}, outside generated range {low}..{high}"
+                )
+
+    for action in framework.actions:
+        for guard in action.guard:
+            check_reachable_guard(guard, f"action '{action.name}'")
+        def scan_effect_guards(effects: list[dict[str, Any]]) -> None:
+            for effect in effects:
+                if effect.get("op") == "if":
+                    guards = effect.get("guard", [])
+                    if isinstance(guards, dict):
+                        guards = [guards]
+                    for guard in guards:
+                        if isinstance(guard, dict):
+                            check_reachable_guard(guard, f"action '{action.name}' conditional")
+                    scan_effect_guards(effect.get("effects", []))
+                    scan_effect_guards(effect.get("else", []))
+        scan_effect_guards(action.effects)
+
+    dice_ranges = [
+        (path, bounds)
+        for path, bounds in random_ranges.items()
+        if path.lower().split(".")[-1] in {"die", "dice", "roll", "roll_result"}
+    ]
+    if len(dice_ranges) == 1:
+        path, (low, high) = dice_ranges[0]
+        roll_values = re.compile(
+            r"\broll(?:s|ed|ing)?\s+(?:is\s+|of\s+)?"
+            r"(\d+(?:\s*,\s*\d+)*(?:\s*,?\s*(?:or|and)\s*\d+)?)",
+            re.IGNORECASE,
+        )
+        for rule in framework.rules:
+            for match in roll_values.finditer(rule):
+                for value in map(int, re.findall(r"\d+", match.group(1))):
+                    if not low <= value <= high:
+                        errors.append(
+                            f"rule names roll {value}, outside generated range "
+                            f"{path}={low}..{high}"
+                        )
     for label, guards in (("judge.win", framework.judge.win), ("judge.lose", framework.judge.lose), ("judge.draw", framework.judge.draw)):
         for guard in guards:
             check_guard(guard, label)
+            check_reachable_guard(guard, label)
     if not framework.judge.active and not isinstance(state.get("hands"), dict):
         warnings.append("no deterministic judge; agents must declare the outcome")
     return errors, warnings

@@ -58,7 +58,9 @@ def test_normalize_content_coerces_types():
     assert [a["name"] for a in c["actions"]] == ["act", "ok"]
     assert c["actions"][0]["effects"] == []
     assert c["actions"][1]["parameters"] == {"type": "object", "properties": {}}
-    assert c["turn"] == {"order": "round_robin", "max_turns": 15}
+    assert c["turn"] == {
+        "order": "round_robin", "max_turns": 15, "action_limits": {}
+    }
 
 
 def test_normalize_content_handles_none():
@@ -67,7 +69,9 @@ def test_normalize_content_handles_none():
     assert c["rules"] == []
     assert c["actions"] == []
     assert c["initial_state"] == {}
-    assert c["turn"] == {"order": "round_robin", "max_turns": 20}
+    assert c["turn"] == {
+        "order": "round_robin", "max_turns": 20, "action_limits": {}
+    }
 
 
 def test_assemble_framework_sets_envelope():

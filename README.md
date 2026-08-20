@@ -21,6 +21,8 @@ calls.
 - 🔁 **Replay viewer** — scrub through a finished run turn-by-turn in the GUI.
 - ⚖️ **Deterministic judge** — the engine checks win/lose/draw conditions itself (no trusting agent-declared outcomes).
 - 🛡️ **Rule guards** — actions can declare preconditions; illegal moves are rejected by the engine.
+- 🎲 **Seeded randomness** — dice and random choices are first-class, replayable effects rather than model guesses.
+- ⏳ **Turn resources** — frameworks can enforce one-action turns and mutually exclusive action categories.
 - 🕵️ **Hidden info & memory** — per-agent private memory, plus alliances between agents.
 - 📝 **Logging** — configurable log level and file (debug/info/warning/error) via the Options menu or CLI.
 - ⚡ **Streaming + self-repairing generation** — generation streams live, validates its result, and automatically repairs malformed frameworks up to three times.
@@ -157,11 +159,42 @@ Actions mutate state through a small declarative DSL:
 | `append` | Append a value to a list at a dot-path |
 | `remove` | Delete a key/index at a dot-path |
 | `shuffle` | Deterministically shuffle a list using the run seed |
+| `random_int` | Write a seeded random integer from an inclusive range |
+| `random_choice` | Write a seeded selection from a non-empty list |
 | `draw` / `move` | Move one or more values between lists |
 | `if` | Apply a guarded effect branch |
 | `reverse_direction` | Reverse authoritative turn direction |
 | `skip_next` | Skip one or more scheduled players |
 | `advance_turn` | Explicitly advance when an action owns scheduling |
+
+Randomness is explicit and reproducible:
+
+```json
+{"op": "random_int", "path": "die", "min": 1, "max": 6}
+```
+
+### Turn resources
+
+Named resources enforce finite per-turn action budgets. Resources refresh for
+each actor at the start of their turn and are consumed only when an action
+succeeds:
+
+```json
+{
+  "actions": [
+    {"name": "roll_dice", "turn_cost": {"standard_action": 1},
+     "effects": [{"op": "random_int", "path": "die", "min": 1, "max": 6}]},
+    {"name": "propose_change", "turn_cost": {"standard_action": 1},
+     "effects": [{"op": "append", "path": "proposals", "value": "{{params.text}}"}]}
+  ],
+  "turn": {"order": "round_robin", "max_turns": 100,
+           "action_limits": {"standard_action": 1}}
+}
+```
+
+After either action succeeds, the other is illegal until the next turn. Agents
+see the remaining budget in authoritative `turn_resources` state. Built-in chat,
+memory, and alliance tools do not consume game-action resources.
 
 Paths and values support templates:
 

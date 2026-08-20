@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from haija.engine import Engine, run_game
+from haija.engine import Engine
 from haija.framework import Framework, load_framework
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"

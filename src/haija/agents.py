@@ -18,7 +18,7 @@ from .tools import all_tools
 def build_system_prompt(framework, agent_name: str, persona: str, tone: str) -> str:
     rules = "\n".join(f"- {r}" for r in framework.rules) or "(none)"
     win = "\n".join(f"- {w}" for w in framework.win_conditions) or "(none)"
-    lose = "\n".join(f"- {l}" for l in framework.lose_conditions) or "(none)"
+    lose = "\n".join(f"- {condition}" for condition in framework.lose_conditions) or "(none)"
     tone_block = f"\nGAME TONE: {tone}\n" if tone else ""
     return f"""You are {agent_name}, an agent playing a game called "{framework.name}".
 
@@ -46,6 +46,11 @@ secret information. You may form and break alliances (form_alliance /
 break_alliance). Some actions may be rejected if they're illegal — the engine
 enforces the rules, so read any error and try a legal move instead. Play to
 win, be decisive, and call end_turn when done.
+
+The `turn_resources` object in state is authoritative. Framework actions can
+consume named finite resources; once one reaches zero, mutually exclusive or
+repeated actions using it are illegal until your next turn. Chat, memory, and
+other built-in social tools do not consume game-action resources.
 
 Be socially active throughout the game. On most turns, react to the table with
 send_message before or after acting. Use public messages for banter and visible
@@ -101,7 +106,7 @@ def format_transcript(messages: list[dict[str, Any]], limit: int = 20) -> str:
         elif t == "say":
             lines.append(f"[{frm} says] {m.get('text', '')}")
         elif t == "turn_end":
-            lines.append(f"[{frm} ends turn{f': ' + m['text'] if m.get('text') else ''}]")
+            lines.append(f"[{frm} ends turn{': ' + m['text'] if m.get('text') else ''}]")
         elif t == "log":
             lines.append(f"[{frm} logs] {m.get('text', '')}")
         else:

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from haija.engine import Engine
-from haija.framework import Framework
+from haija.framework import Framework, validate_framework
 from haija.tools import all_tools
 
 
@@ -197,7 +197,6 @@ def test_engine_does_not_overwrite_preset_players():
 
 def test_general_config_roundtrip():
     from haija.config import ProjectConfig, dump_config
-    from io import StringIO
     import tomllib
 
     cfg = ProjectConfig.load(
@@ -212,7 +211,6 @@ def test_general_config_roundtrip():
 
 
 def test_generate_framework_observer():
-    from haija.framework import assemble_framework
     from haija.generate import generate_framework
 
     # We can't call the real API, but we can test that observer is called
@@ -254,6 +252,9 @@ def test_generation_prompt_requires_playable_initial_state():
     assert "immediately playable on turn 1" in system
     assert "Never emit an" in system
     assert "unresolved setup/loading/dealing phase" in system
+    assert '"op":"random_int"' in system
+    assert "turn.action_limits" in system
+    assert "Every stated result and score threshold must be reachable" in system
 
 
 def test_generation_repairs_validation_failure_and_rechecks():
@@ -308,6 +309,54 @@ def test_generation_reports_repair_progress_events():
     assert "generate_validation_failed" in types
     assert "generate_repair_start" in types
     assert types[-1] == "generate_done"
+
+
+def test_generation_repairs_empty_die_and_missing_turn_budget():
+    from haija.generate import generate_framework
+    from haija.provider import ChatResponse
+
+    invalid = {
+        "rules": ["On a turn, either propose a change or roll the dice."],
+        "initial_state": {"die": 1, "proposals": []},
+        "actions": [
+            {"name": "roll_dice", "effects": [{"op": "set", "path": "die", "value": ""}]},
+            {"name": "propose_change", "effects": [
+                {"op": "append", "path": "proposals", "value": "change"}
+            ]},
+        ],
+    }
+    repaired = {
+        **invalid,
+        "turn": {"action_limits": {"standard_action": 1}},
+        "actions": [
+            {
+                "name": "roll_dice",
+                "turn_cost": {"standard_action": 1},
+                "effects": [{"op": "random_int", "path": "die", "min": 1, "max": 6}],
+            },
+            {
+                "name": "propose_change",
+                "turn_cost": {"standard_action": 1},
+                "effects": [{"op": "append", "path": "proposals", "value": "change"}],
+            },
+        ],
+    }
+
+    class FakeProvider:
+        def __init__(self):
+            self.responses = iter((invalid, repaired))
+            self.prompts = []
+
+        def chat(self, messages, **kwargs):
+            self.prompts.append(messages[-1]["content"])
+            return ChatResponse(content=json.dumps(next(self.responses)))
+
+    provider = FakeProvider()
+    framework = generate_framework(provider, "Nomic", name="Nomic")
+    assert "sets numeric state 'die' to an empty string" in provider.prompts[1]
+    assert "shared turn_cost resource" in provider.prompts[1]
+    assert framework.actions[0].effects[0]["op"] == "random_int"
+    assert framework.turn.action_limits == {"standard_action": 1}
 
 
 def test_provider_factory_and_provider_defaults(tmp_path):
@@ -667,3 +716,128 @@ def test_generated_index_card_effects_use_pre_removal_card_and_inverted_draw_gua
     assert e.state["direction"] == -1
     assert e.apply_action(fw.actions[1], "A", {})["ok"]
     assert len(e.state["hands"]["A"]) == 2
+
+
+def test_seeded_random_effects_are_real_bounded_and_replayable():
+    framework = Framework.from_dict({
+        "name": "Dice",
+        "initial_state": {"random_seed": 42, "die": 0, "weather": ""},
+        "actions": [
+            {"name": "roll_dice", "effects": [
+                {"op": "random_int", "path": "die", "min": 1, "max": 6}
+            ]},
+            {"name": "weather", "effects": [
+                {"op": "random_choice", "path": "weather", "choices": ["sun", "rain"]}
+            ]},
+        ],
+    })
+    first = Engine(framework, ["A"])
+    second = Engine(framework, ["A"])
+    result = first.apply_action(framework.actions[0], "A", {})
+    replay = second.apply_action(framework.actions[0], "A", {})
+    assert 1 <= first.state["die"] <= 6
+    assert result["effects"][0]["value"] == replay["effects"][0]["value"]
+    first.apply_action(framework.actions[1], "A", {})
+    assert first.state["weather"] in {"sun", "rain"}
+
+
+def test_shared_turn_resource_prevents_repeated_or_mutually_exclusive_actions():
+    framework = Framework.from_dict({
+        "name": "Nomic",
+        "initial_state": {"die": 1, "proposals": []},
+        "turn": {"action_limits": {"standard_action": 1}},
+        "actions": [
+            {
+                "name": "roll_dice",
+                "turn_cost": {"standard_action": 1},
+                "effects": [{"op": "random_int", "path": "die", "min": 1, "max": 6}],
+            },
+            {
+                "name": "propose_change",
+                "turn_cost": {"standard_action": 1},
+                "effects": [{"op": "append", "path": "proposals", "value": "proposal"}],
+            },
+        ],
+    })
+    engine = Engine(framework, ["A", "B"])
+    engine.begin_turn("A")
+    assert engine.apply_action(framework.actions[0], "A", {})["ok"]
+    rejected = engine.apply_action(framework.actions[1], "A", {})
+    assert not rejected["ok"]
+    assert "standard_action' exhausted" in rejected["error"]
+    assert engine.public_state("A")["turn_resources"] == {"standard_action": 0}
+    engine.begin_turn("A")
+    assert engine.apply_action(framework.actions[1], "A", {})["ok"]
+
+
+def test_failed_random_action_restores_rng_and_does_not_consume_turn_resource():
+    broken = Framework.from_dict({
+        "name": "Atomic dice",
+        "initial_state": {"random_seed": 9, "die": 0},
+        "turn": {"action_limits": {"standard": 1}},
+        "actions": [{
+            "name": "broken_roll",
+            "turn_cost": {"standard": 1},
+            "effects": [
+                {"op": "random_int", "path": "die", "min": 1, "max": 6},
+                {"op": "append", "path": "missing", "value": 1},
+            ],
+        }],
+    })
+    valid = Framework.from_dict({
+        "name": "Atomic dice",
+        "initial_state": {"random_seed": 9, "die": 0},
+        "turn": {"action_limits": {"standard": 1}},
+        "actions": [{
+            "name": "roll_dice",
+            "turn_cost": {"standard": 1},
+            "effects": [{"op": "random_int", "path": "die", "min": 1, "max": 6}],
+        }],
+    })
+    engine = Engine(broken, ["A"])
+    engine.begin_turn("A")
+    assert not engine.apply_action(broken.actions[0], "A", {})["ok"]
+    assert engine.public_state("A")["turn_resources"] == {"standard": 1}
+    # Swap in the corrected action: the failed roll must not have advanced RNG.
+    engine.framework = valid
+    corrected = engine.apply_action(valid.actions[0], "A", {})
+    fresh = Engine(valid, ["A"])
+    fresh.begin_turn("A")
+    expected = fresh.apply_action(valid.actions[0], "A", {})
+    assert corrected["effects"][0]["value"] == expected["effects"][0]["value"]
+
+
+def test_validator_rejects_schrodingers_die_and_unreachable_rolls():
+    invalid = Framework.from_dict({
+        "name": "Nomic",
+        "rules": ["On a turn, either propose a change or roll the dice."],
+        "initial_state": {"die": 1},
+        "actions": [
+            {
+                "name": "roll_dice",
+                "effects": [{"op": "set", "path": "die", "value": ""}],
+            },
+            {"name": "propose_change", "effects": [{"op": "set", "path": "die", "value": 1}]},
+        ],
+    })
+    errors, _ = validate_framework(invalid)
+    assert any("sets numeric state 'die' to an empty string" in error for error in errors)
+    assert any("has no random effect" in error for error in errors)
+    assert any("shared turn_cost resource" in error for error in errors)
+
+    unreachable = Framework.from_dict({
+        "name": "Impossible die",
+        "rules": ["Players score if they roll 6, 8, or 12."],
+        "initial_state": {"die": 1, "score": 0},
+        "actions": [{
+            "name": "roll_dice",
+            "effects": [
+                {"op": "random_int", "path": "die", "min": 1, "max": 6},
+                {"op": "if", "guard": [{"op": "eq", "path": "die", "value": 12}],
+                 "effects": [{"op": "incr", "path": "score", "value": 1}]},
+            ],
+        }],
+    })
+    errors, _ = validate_framework(unreachable)
+    assert any("outside generated range 1..6" in error for error in errors)
+    assert any("rule names roll 8" in error for error in errors)
